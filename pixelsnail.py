@@ -40,16 +40,17 @@ class CausalConv2d(nn.Module):
     def __init__(self, in_channels:int, out_channels:int, kernel_size:tuple,
                               stride=1, mode="downright", bias=True, weight_norm = True):
         super().__init__()
-        assert mode in ["right", "downright", "down"]
+        assert mode in ["right", "downright", "down", "causal"]
         # 4-tuple, uses (left, right, top, bottom)
         ker_v, ker_h = kernel_size
-        
+        self.kernel_size = kernel_size
+        self.mode = mode
         if mode == "right":
             pad = [ker_h-1, 0, (ker_v-1)>>1, (ker_v-1)>>1]
         elif mode == "downright":
             pad = [ker_h-1, 0, ker_v-1, 0]
-        elif mode == "down":
-            pad = [ker_h //2 , ker_h //2, ker_v-1, 0]
+        elif mode in ["down", "causal"] :
+            pad = [ker_h //2 , ker_h //2, ker_v-1, 0]            
             
         self.padding = nn.ZeroPad2d(pad)
         if weight_norm:
@@ -61,6 +62,9 @@ class CausalConv2d(nn.Module):
             
     def forward(self, x):
         x = self.padding(x)
+        if self.mode == "causal":
+            # mask the later half of last row of kernel
+            self.conv.conv.weight_v.data[..., -1, self.kernel_size[1]//2:].zero_()
         return self.conv(x)
     
 def shift_right(x, size=1):
@@ -81,17 +85,18 @@ class GatedResBlock(nn.Module):
             kernel_size = (kernel_size, kernel_size)
             
         # instantiate the convolutional layer
-        if mode in ["downright", "right",  "down"]:
-            self.conv1 = CausalConv2d(n_channels, hidden_size, kernel_size, mode=mode, bias=bias, weight_norm=False)
+        if mode in ["downright", "causal",  "down"]:
+            self.conv1 = CausalConv2d(n_channels, hidden_size, kernel_size, mode=mode, bias=bias, weight_norm=True)
+            self.conv2 = CausalConv2d(hidden_size, 2*n_channels, kernel_size, mode=mode, bias=bias, weight_norm=True)
         else:
             self.conv1 = ConvNorm(n_channels, hidden_size, kernel_size, 
                                   padding=(kernel_size[0]//2, kernel_size[1]//2), bias=bias)
+            self.conv2 = ConvNorm(hidden_size, 2*n_channels, kernel_size, 
+                                  padding=(kernel_size[0]//2, kernel_size[1]//2), bias=bias)
         self.activ = nn.ELU()
         
-        # a 1x1 conv
         # output channel must be double input channels
         # so we can apply glu
-        self.conv2 = ConvNorm2d11(hidden_size, 2*n_channels, bias=False)
         self.dropout = nn.Dropout(dropout)
         
         # glu is implemented as a part of torch.nn module
@@ -103,12 +108,14 @@ class GatedResBlock(nn.Module):
         #    if "conv" in name:
         #        if "bias" in name:
         #            param.data.fill_(0.0)
+
         #        if "weight" in name:
-        #            nn.init.uniform_(param.data, -0.1, 0.1)
+        #            param.data.fill_(0.3)
+        #            #nn.init.uniform_(param.data, -0.1, 0.1)
                     
     def forward(self, x):
-        x = self.pre_activ(x)
-        out = self.conv1(x)
+        out = self.pre_activ(x)
+        out = self.conv1(out)
         out = self.dropout(self.activ(out))
         out = self.conv2(out)
         out = self.glu(out)
@@ -200,13 +207,29 @@ class PositionalEncoding2D(nn.Module):
     def forward(self, x):
         return torch.cat([x, self.encoding.expand(x.shape[0], -1, -1, -1)], dim=1)
         
+# joins two branches together with two 1x1 convolutions
+class JoinBlock(nn.Module):
+    def __init__(self, n_channels, hidden_dim):
+        super().__init__()
+        self.activ = nn.ELU()
+        self.conv_in1 = ConvNorm2d11(n_channels, hidden_dim)
+        self.conv_in2 = ConvNorm2d11(n_channels, hidden_dim)
+        self.conv_out = ConvNorm2d11(hidden_dim, n_channels)
+    
+    def forward(self, x1, x2):
+        x1 = self.activ(self.conv_in1(self.activ(x1)))
+        x2 = self.activ(self.conv_in2(self.activ(x2)))
+        out = x1+x2
+        out = self.activ(self.conv_out(self.activ(out)))
+        return out
+    
 # block
 class PixelSnailBlock(nn.Module):
     def __init__(self, n_channels, n_resblocks, kernel_size, target_size, attn_n_head=4, dropout=0.1):
         super().__init__()
         
         # first res layers
-        self.resblocks = [GatedResBlock(n_channels, kernel_size, hidden_size=n_channels,  mode="down", dropout=dropout, bias=True) for _ in range(n_resblocks)]
+        self.resblocks = [GatedResBlock(n_channels, kernel_size, hidden_size=n_channels,  mode="causal", dropout=dropout, bias=True) for _ in range(n_resblocks)]
         self.resblocks = nn.Sequential(*self.resblocks)
         
         # self attention 
@@ -233,10 +256,8 @@ class PixelSnailBlock(nn.Module):
             num_heads= attn_n_head, dropout=dropout
         )
         
-        self.out_resblock11 = GatedResBlock11(
-            n_channels, hidden_size=n_channels, dropout=dropout
-        )
         # combine conv + attn results
+        self.join_attn = JoinBlock(n_channels, n_channels)
 
     def forward(self, x):
         N, _, H, W = x.shape
@@ -251,13 +272,13 @@ class PixelSnailBlock(nn.Module):
         kv = kv.flatten(-2).transpose(-1, -2) 
         q = q.flatten(-2).transpose(-1, -2)
         causal_mask = get_causal_mask_as(q.shape[-2], kv.shape[-2]).to(q.device)
-        out = self.attention(q, kv, kv, causal_mask)
+        attn = self.attention(q, kv, kv, causal_mask)
         
         # back to channel_first, 2 dim layout
-        out = out.reshape(N, H, W, -1)
-        out = out.permute(0, 3, 1, 2) #channel_first layout
+        attn = attn.reshape(N, H, W, -1)
+        attn = attn.permute(0, 3, 1, 2) #channel_first layout
         
-        return self.out_resblock11(out)
+        return self.join_attn(out, attn)
     
 class PixelSnail(nn.Module):
     def __init__(self, n_class, hidden_dim, n_layers, n_resblocks, n_output_layers, target_size,
@@ -281,7 +302,7 @@ class PixelSnail(nn.Module):
         if n_output_layers > 1:
             self.output_layers = [GatedResBlock11(hidden_dim, hidden_size=hidden_dim) for _ in range(n_output_layers-1)]
             self.output_layers.append(nn.ELU())
-        else: self.output_layers = []
+        else: self.output_layers = [nn.ELU()]
         self.output_layers.append(ConvNorm2d11(hidden_dim, n_class))
         self.output_layers = nn.Sequential(*self.output_layers)
         
@@ -295,6 +316,7 @@ class PixelSnail(nn.Module):
         out = x_down + x_downright
         
         out = self.layers(out)
+        
         out = self.output_layers(out)
         
         return out

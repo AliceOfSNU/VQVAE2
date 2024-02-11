@@ -23,7 +23,7 @@ train_config = {
     "down_kernel": (2, 5),
     "downright_kernel":(2, 3),
     "hidden_kernel":(3, 5),
-    "run_id": "initial_setup",
+    "run_id": "fixed_attn_join_path",
     "seed": 12,
 }
 
