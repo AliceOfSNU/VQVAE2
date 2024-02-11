@@ -1,0 +1,300 @@
+# autoregressive model
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from functools import lru_cache
+import utils
+# if newest torch, use torch.nn.utils.parametrizations.weight_norm
+# https://pytorch.org/docs/stable/generated/torch.nn.utils.weight_norm.html
+from torch.nn.utils import weight_norm
+
+import math
+
+# modeling heavily borrows from https://github.com/rosinality/vq-vae-2-pytorch/
+# MIT License 
+
+# very basic building block: ConvNorm
+class ConvNorm(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size,
+                              stride=1, padding=0, bias=True):
+        super().__init__()
+        # create a convolution layer
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
+                              stride=stride, padding=padding, bias=bias)
+        self.conv = weight_norm(self.conv)
+    # layernorm
+    def forward(self, x):
+        return self.conv(x)
+
+# specialization of 1x1 size. for convenience.
+class ConvNorm2d11(ConvNorm):
+    def __init__(self, in_channels, out_channels, stride=1, bias=True):
+        super().__init__(in_channels, out_channels, 1, stride=stride, padding=0, bias=bias)
+        
+    def forward(self, x):
+        return super().forward(x)
+        
+# casual building block: CasualConv
+class CausalConv2d(nn.Module):
+    def __init__(self, in_channels:int, out_channels:int, kernel_size:tuple,
+                              stride=1, mode="downright", bias=True, weight_norm = True):
+        super().__init__()
+        assert mode in ["right", "downright", "down"]
+        # 4-tuple, uses (left, right, top, bottom)
+        ker_v, ker_h = kernel_size
+        
+        if mode == "right":
+            pad = [ker_h-1, 0, (ker_v-1)>>1, (ker_v-1)>>1]
+        elif mode == "downright":
+            pad = [ker_h-1, 0, ker_v-1, 0]
+        elif mode == "down":
+            pad = [ker_h //2 , ker_h //2, ker_v-1, 0]
+            
+        self.padding = nn.ZeroPad2d(pad)
+        if weight_norm:
+            self.conv = ConvNorm(in_channels, out_channels, kernel_size,
+                             stride=stride, padding=0, bias=bias)
+        else:
+            self.conv = nn.Conv2d(in_channels, out_channels, kernel_size,
+                             stride=stride, padding=0, bias=bias)
+            
+    def forward(self, x):
+        x = self.padding(x)
+        return self.conv(x)
+    
+def shift_right(x, size=1):
+    return F.pad(x, [size, 0, 0, 0])[:, :, :, :-1]# add zero to the left and shift right
+    
+def shift_down(x, size=1):
+    return F.pad(x, [0, 0, size, 0])[:, :, :-1, :]# add zero to the top and shift down
+    
+# gated resblock
+class GatedResBlock(nn.Module):
+    def __init__(self,
+        n_channels, kernel_size, hidden_size, 
+        mode=None, dropout=0.1, bias=True
+    ):
+        super().__init__()
+        self.pre_activ = nn.ELU()
+        if type(kernel_size) is int:
+            kernel_size = (kernel_size, kernel_size)
+            
+        # instantiate the convolutional layer
+        if mode in ["downright", "right",  "down"]:
+            self.conv1 = CausalConv2d(n_channels, hidden_size, kernel_size, mode=mode, bias=bias, weight_norm=False)
+        else:
+            self.conv1 = ConvNorm(n_channels, hidden_size, kernel_size, 
+                                  padding=(kernel_size[0]//2, kernel_size[1]//2), bias=bias)
+        self.activ = nn.ELU()
+        
+        # a 1x1 conv
+        # output channel must be double input channels
+        # so we can apply glu
+        self.conv2 = ConvNorm2d11(hidden_size, 2*n_channels, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        
+        # glu is implemented as a part of torch.nn module
+        # this should be a single-liner
+        self.glu = nn.GLU(1)
+        
+        ## initialize layers
+        #for name, param in self.named_parameters():
+        #    if "conv" in name:
+        #        if "bias" in name:
+        #            param.data.fill_(0.0)
+        #        if "weight" in name:
+        #            nn.init.uniform_(param.data, -0.1, 0.1)
+                    
+    def forward(self, x):
+        x = self.pre_activ(x)
+        out = self.conv1(x)
+        out = self.dropout(self.activ(out))
+        out = self.conv2(out)
+        out = self.glu(out)
+        out = x + out
+        return out
+       
+# specialization with 1x1.
+class GatedResBlock11(GatedResBlock):
+    def __init__(self,
+        n_channels, hidden_size, dropout=0.1, bias=True
+    ):
+        super().__init__(n_channels, (1, 1), hidden_size,  dropout=dropout, bias=bias)
+        
+    def forward(self, x):
+        return super().forward(x)
+
+@lru_cache(maxsize=32)
+def get_causal_mask_as(q_size, kv_size):
+    # strictly lower triangualar
+    return torch.tril(torch.ones(q_size, kv_size), diagonal=-1)
+
+# a dot product self attention
+class MultiHeadAttentionLayer(nn.Module):
+
+    def __init__(self, query_dim, key_dim, value_dim, embed_dim, num_heads, dropout=0.1):
+       
+        super().__init__()
+        self.embed_dim = embed_dim
+        
+        # create q, k, v matrices, but use weight norm!
+        self.query_proj = weight_norm(nn.Linear(query_dim, embed_dim))
+        self.key_proj = weight_norm(nn.Linear(key_dim, embed_dim))
+        self.value_proj = weight_norm(nn.Linear(value_dim, embed_dim))
+
+        self.dropout = nn.Dropout(dropout)
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // self.num_heads
+        assert self.head_dim * num_heads == embed_dim, f"embed_dim({embed_dim}) must be a multiple of num_heads({num_heads})"
+        # Initialize the following layers and parameters to perform attention
+        self.head_proj = nn.Linear(embed_dim, embed_dim)
+
+    def forward(self, query, key, value, attn_mask=None):
+        N, T, _ = query.shape
+        N, S, _ = value.shape
+        H = self.num_heads
+        D = self.embed_dim
+        
+        # expected shape is (N, H, T/S, D/H)
+        query = self.query_proj(query).view(N, T, H, D//H).transpose(-2, -3)
+        key = self.key_proj(key).view(N, S, H, D//H).transpose(-2, -3)
+        value = self.value_proj(value).view(N, S, H, D//H).transpose(-2, -3)
+
+        #compute dot-product attention separately for each head. Don't forget the scaling value!
+        #Expected shape of dot_product is (N, H, T, S)
+        #(N, H, T, D//H) @ (N, H, S, D//H)'
+        #N and H dimensions are pairwise.
+        dot_product = torch.matmul(query, key.transpose(-1, -2)) / math.sqrt(D//H)
+
+        if attn_mask is not None:
+            # convert att_mask which is multiplicative, to an additive mask
+            mask = dot_product.new_zeros(attn_mask.shape)
+            mask.masked_fill_((attn_mask==0), float("-inf")) #inplace fill
+            dot_product = dot_product + mask
+            # first row might be full of "-inf". we remove it
+            dot_product = dot_product[..., 1:, :]
+            attn = dot_product.softmax(-1)
+            # and add a row of zeros
+            row = attn.new_zeros(*attn.shape[:-2], 1, attn.shape[-1])
+            attn = torch.cat([row, attn], -2)# concat first row
+        else:
+            attn = dot_product.softmax(-1)
+        # apply softmax, dropout, and use value
+        attn = self.dropout(attn) #(N, H, T, S)
+        y = torch.matmul(attn, value).transpose(-3, -2).flatten(-2) #(N, T, H, Ev=D//H)
+        
+        return y
+   
+class PositionalEncoding2D(nn.Module):
+    def __init__(self, target_size):
+        super().__init__()
+        H, W = target_size
+        coord_y = (torch.arange(H).float() - H / 2) / H
+        coord_y = coord_y.view(1, H, 1).expand(1, H, W)
+        coord_x = (torch.arange(W).float() - W / 2) / W
+        coord_x = coord_x.view(1, 1, W).expand(1, H, W)
+        encoding = torch.cat([coord_y, coord_x], dim=0).unsqueeze(0) # add batch dim
+        self.register_buffer('encoding', encoding)
+        
+    def forward(self, x):
+        return torch.cat([x, self.encoding.expand(x.shape[0], -1, -1, -1)], dim=1)
+        
+# block
+class PixelSnailBlock(nn.Module):
+    def __init__(self, n_channels, n_resblocks, kernel_size, target_size, attn_n_head=4, dropout=0.1):
+        super().__init__()
+        
+        # first res layers
+        self.resblocks = [GatedResBlock(n_channels, kernel_size, hidden_size=n_channels,  mode="down", dropout=dropout, bias=True) for _ in range(n_resblocks)]
+        self.resblocks = nn.Sequential(*self.resblocks)
+        
+        # self attention 
+        # key&value: cat resblock output to input.
+        self.kv_resblock11 = GatedResBlock11(
+            # output, input, positional encoding
+            n_channels * 2 + 2,
+            hidden_size = n_channels, dropout=dropout
+        )
+        # query: use resblock outputs
+        self.query_resblock11 = GatedResBlock11(
+            # output, positional_encoding
+            n_channels + 2,
+            hidden_size= n_channels, dropout=dropout
+        )
+
+        self.positional_encoding = PositionalEncoding2D(target_size)
+        attn_hidden_dim = n_channels
+        self.attention = MultiHeadAttentionLayer(
+            query_dim = n_channels + 2,
+            key_dim = n_channels * 2 + 2,
+            value_dim = n_channels * 2 + 2,
+            embed_dim= attn_hidden_dim,
+            num_heads= attn_n_head, dropout=dropout
+        )
+        
+        self.out_resblock11 = GatedResBlock11(
+            n_channels, hidden_size=n_channels, dropout=dropout
+        )
+        # combine conv + attn results
+
+    def forward(self, x):
+        N, _, H, W = x.shape
+        out = self.resblocks(x)
+        # concatenate at channel dim, and shuffle!
+        kv = self.positional_encoding(torch.cat([out, x], dim=1))
+        kv = self.kv_resblock11(kv)
+        q = self.positional_encoding(out)
+        q = self.query_resblock11(q)
+        
+        # channel_last layout, flattened
+        kv = kv.flatten(-2).transpose(-1, -2) 
+        q = q.flatten(-2).transpose(-1, -2)
+        causal_mask = get_causal_mask_as(q.shape[-2], kv.shape[-2]).to(q.device)
+        out = self.attention(q, kv, kv, causal_mask)
+        
+        # back to channel_first, 2 dim layout
+        out = out.reshape(N, H, W, -1)
+        out = out.permute(0, 3, 1, 2) #channel_first layout
+        
+        return self.out_resblock11(out)
+    
+class PixelSnail(nn.Module):
+    def __init__(self, n_class, hidden_dim, n_layers, n_resblocks, n_output_layers, target_size,
+                 down_kernel=(2, 5), downright_kernel=(2, 3), hidden_kernel=(3, 3)
+                 ):
+        super().__init__()
+        
+        self.n_class = n_class
+        
+        self.down0 = CausalConv2d(
+            n_class, hidden_dim, down_kernel, mode='down'
+        )
+        self.downright0 = CausalConv2d(
+            n_class, hidden_dim, downright_kernel, mode='downright'
+        )
+        
+        self.layers = [PixelSnailBlock(hidden_dim, n_resblocks, hidden_kernel, target_size) for _ in range(n_layers)]
+        self.layers = nn.Sequential(*self.layers)
+        
+        # 1x1 convolutions
+        if n_output_layers > 1:
+            self.output_layers = [GatedResBlock11(hidden_dim, hidden_size=hidden_dim) for _ in range(n_output_layers-1)]
+            self.output_layers.append(nn.ELU())
+        else: self.output_layers = []
+        self.output_layers.append(ConvNorm2d11(hidden_dim, n_class))
+        self.output_layers = nn.Sequential(*self.output_layers)
+        
+    def forward(self, x):
+        x = (
+            F.one_hot(x, self.n_class).permute(0, 3, 1, 2).float()
+        )
+        x_down = shift_down(self.down0(x))
+        x_downright = shift_right(self.downright0(x))
+        
+        out = x_down + x_downright
+        
+        out = self.layers(out)
+        out = self.output_layers(out)
+        
+        return out

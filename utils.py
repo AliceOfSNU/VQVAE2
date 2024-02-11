@@ -1,0 +1,48 @@
+import torch
+import matplotlib.pyplot as plt
+import os
+
+def plot_tensor(t:torch.Tensor):
+    fig, ax = plt.subplots(1, 1)
+    if len(t.shape) > 3: t = t[0]
+    elif len(t.shape) == 2: t.unsqueeze(0)
+    ax.imshow(t.detach().permute(1, 2, 0).cpu().numpy())
+    
+def plot_tensor_grid(t:torch.Tensor, grid:tuple[int, int], 
+                     save_to=None, title=None, xlabel=None, ylabel=None):
+    assert(t.shape[0] == grid[0]*grid[1], "grid size must match the number of elements in the first(batch) dimension")
+    t = t.detach().permute(0, 2, 3, 1).cpu().numpy()
+    fig, ax = plt.subplots(*grid)
+    for i in range(grid[0]):
+        for j in range(grid[1]):
+            ax[i, j].imshow(t[i*grid[0]+j])
+    if save_to is not None:
+        fig.savefig(save_to)
+        
+def load_model(load_path, model, optimizer=None):
+
+    print(f"Loading checkpoint from {load_path}")
+    checkpoint  = torch.load(load_path)
+    model.load_state_dict(checkpoint['model_state_dict'], strict= False)
+    checkpoint.pop('model_state_dict')
+    
+    if optimizer != None:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        checkpoint.pop('optimizer_state_dict')
+
+    # return the rest in a dict
+    return [model, optimizer, checkpoint]
+    
+def save_model(save_path, epoch, model, optimizer, lr_scheduler=None, stats_dict=None):
+    dict =  {'model_state_dict'        : model.state_dict(),
+            'optimizer_state_dict'     : optimizer.state_dict(),
+            'epoch'                    : epoch
+            }
+    if lr_scheduler:
+        dict['scheduler_state_dict'] = lr_scheduler.state_dict()
+    if stats_dict:
+        dict.update(stats_dict)
+        
+    filename = "epoch{}.pth".format(epoch)
+    torch.save(dict, os.path.join(save_path, filename))
+    
