@@ -14,16 +14,18 @@ import os
 USE_WANDB=True
 
 train_config = {
-    "n_epochs" :3,
+    "n_epochs" :5,
     "lr" :1e-3,
     "hidden_dim": 128,
     "n_layers": 2,
     "n_resblocks": 4,
     "batch_size": 32,
+    "attn_embed_dim":128,
+    "attn_n_heads":8,
     "down_kernel": (2, 5),
     "downright_kernel":(2, 3),
     "hidden_kernel":(3, 5),
-    "run_id": "fixed_attn_join_path",
+    "run_id": "8_heads",
     "seed": 12,
 }
 

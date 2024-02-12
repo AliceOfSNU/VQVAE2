@@ -63,7 +63,7 @@ class CausalConv2d(nn.Module):
     def forward(self, x):
         x = self.padding(x)
         if self.mode == "causal":
-            # mask the later half of last row of kernel
+            # mask the later half of last row of kernel (B mask)
             self.conv.conv.weight_v.data[..., -1, self.kernel_size[1]//2:].zero_()
         return self.conv(x)
     
@@ -217,15 +217,15 @@ class JoinBlock(nn.Module):
         self.conv_out = ConvNorm2d11(hidden_dim, n_channels)
     
     def forward(self, x1, x2):
-        x1 = self.activ(self.conv_in1(self.activ(x1)))
-        x2 = self.activ(self.conv_in2(self.activ(x2)))
+        x1 = self.conv_in1(self.activ(x1))
+        x2 = self.conv_in2(self.activ(x2))
         out = x1+x2
         out = self.activ(self.conv_out(self.activ(out)))
         return out
     
 # block
 class PixelSnailBlock(nn.Module):
-    def __init__(self, n_channels, n_resblocks, kernel_size, target_size, attn_n_head=4, dropout=0.1):
+    def __init__(self, n_channels, n_resblocks, kernel_size, target_size, attn_n_head=8, dropout=0.1):
         super().__init__()
         
         # first res layers
