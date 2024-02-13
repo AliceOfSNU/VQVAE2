@@ -46,6 +46,8 @@ model = vqvae.VQVAE(
     config["hidden_dim"],
     config["n_resbloks"]
 )
+print(model)
+
 device = torch.device("cuda")
 model = model.to(device)
 print("training on device: ", device)

@@ -46,7 +46,7 @@ class CausalConv2d(nn.Module):
         self.kernel_size = kernel_size
         self.mode = mode
         if mode == "right":
-            pad = [ker_h-1, 0, (ker_v-1)>>1, (ker_v-1)>>1]
+            pad = [ker_h-1, 0, ker_v//1, ker_v//1]
         elif mode == "downright":
             pad = [ker_h-1, 0, ker_v-1, 0]
         elif mode in ["down", "causal"] :
@@ -77,7 +77,7 @@ def shift_down(x, size=1):
 class GatedResBlock(nn.Module):
     def __init__(self,
         n_channels, kernel_size, hidden_size, 
-        mode=None, dropout=0.1, bias=True
+        mode=None, cond_channels = 0, dropout=0.1, bias=True
     ):
         super().__init__()
         self.pre_activ = nn.ELU()
@@ -95,6 +95,11 @@ class GatedResBlock(nn.Module):
                                   padding=(kernel_size[0]//2, kernel_size[1]//2), bias=bias)
         self.activ = nn.ELU()
         
+        if cond_channels>0:
+            self.cond_conv = ConvNorm2d11(cond_channels, 2*n_channels, bias=False)
+            self.is_conditioned = True
+        else: 
+            self.is_conditioned = False
         # output channel must be double input channels
         # so we can apply glu
         self.dropout = nn.Dropout(dropout)
@@ -113,11 +118,14 @@ class GatedResBlock(nn.Module):
         #            param.data.fill_(0.3)
         #            #nn.init.uniform_(param.data, -0.1, 0.1)
                     
-    def forward(self, x):
+    def forward(self, x, cond=None):
         out = self.pre_activ(x)
         out = self.conv1(out)
         out = self.dropout(self.activ(out))
         out = self.conv2(out)
+        if self.is_conditioned:
+            cond = self.cond_conv(cond)
+            out = out + cond #broadcasts if condition is same for all pixels
         out = self.glu(out)
         out = x + out
         return out
@@ -167,11 +175,7 @@ class MultiHeadAttentionLayer(nn.Module):
         query = self.query_proj(query).view(N, T, H, D//H).transpose(-2, -3)
         key = self.key_proj(key).view(N, S, H, D//H).transpose(-2, -3)
         value = self.value_proj(value).view(N, S, H, D//H).transpose(-2, -3)
-
-        #compute dot-product attention separately for each head. Don't forget the scaling value!
-        #Expected shape of dot_product is (N, H, T, S)
         #(N, H, T, D//H) @ (N, H, S, D//H)'
-        #N and H dimensions are pairwise.
         dot_product = torch.matmul(query, key.transpose(-1, -2)) / math.sqrt(D//H)
 
         if attn_mask is not None:
@@ -225,13 +229,13 @@ class JoinBlock(nn.Module):
     
 # block
 class PixelSnailBlock(nn.Module):
-    def __init__(self, n_channels, n_resblocks, kernel_size, target_size, attn_n_head=8, dropout=0.1):
+    def __init__(self, n_channels, n_resblocks, kernel_size, target_size, cond_channels = 0, attn_n_head=8, dropout=0.1):
         super().__init__()
         
         # first res layers
-        self.resblocks = [GatedResBlock(n_channels, kernel_size, hidden_size=n_channels,  mode="causal", dropout=dropout, bias=True) for _ in range(n_resblocks)]
-        self.resblocks = nn.Sequential(*self.resblocks)
-        
+        self.resblocks = [GatedResBlock(n_channels, kernel_size, hidden_size=n_channels,  
+                                        mode="causal", cond_channels=cond_channels, dropout=dropout, bias=True) for _ in range(n_resblocks)]
+        self.resblocks = nn.ModuleList(self.resblocks)
         # self attention 
         # key&value: cat resblock output to input.
         self.kv_resblock11 = GatedResBlock11(
@@ -259,9 +263,10 @@ class PixelSnailBlock(nn.Module):
         # combine conv + attn results
         self.join_attn = JoinBlock(n_channels, n_channels)
 
-    def forward(self, x):
+    def forward(self, x, cond=None):
         N, _, H, W = x.shape
-        out = self.resblocks(x)
+        for block in self.resblocks:
+            out = block(x, cond)
         # concatenate at channel dim, and shuffle!
         kv = self.positional_encoding(torch.cat([out, x], dim=1))
         kv = self.kv_resblock11(kv)
@@ -282,7 +287,7 @@ class PixelSnailBlock(nn.Module):
     
 class PixelSnail(nn.Module):
     def __init__(self, n_class, hidden_dim, n_layers, n_resblocks, n_output_layers, target_size,
-                 down_kernel=(2, 5), downright_kernel=(2, 3), hidden_kernel=(3, 3)
+                 cond_img = 0, cond_channels=0, n_cond_embed = 0, n_cond_resblocks=0, down_kernel=(2, 5), downright_kernel=(2, 3), hidden_kernel=(3, 3)
                  ):
         super().__init__()
         
@@ -295,9 +300,19 @@ class PixelSnail(nn.Module):
             n_class, hidden_dim, downright_kernel, mode='downright'
         )
         
-        self.layers = [PixelSnailBlock(hidden_dim, n_resblocks, hidden_kernel, target_size) for _ in range(n_layers)]
-        self.layers = nn.Sequential(*self.layers)
+        if cond_img > 0: #image conditions
+            if n_cond_resblocks > 0:
+                self.cond_net = [ConvNorm(n_class, cond_channels, (3, 3), padding=1)]
+                self.cond_net.extend([GatedResBlock(cond_channels, (3, 3), cond_channels) for _ in range(n_cond_resblocks)])
+                self.cond_net = nn.Sequential(*self.cond_net)
+            else:
+                self.cond_net = ConvNorm(n_class, cond_channels, (3, 3), padding=1)
         
+        if n_cond_embed > 0: #label(discrete conditions)
+            self.cond_embed = nn.Embedding(n_cond_embed, cond_channels)
+        
+        self.layers = [PixelSnailBlock(hidden_dim, n_resblocks, hidden_kernel, target_size, cond_channels=cond_channels) for _ in range(n_layers)]
+        self.layers = nn.ModuleList(self.layers)
         # 1x1 convolutions
         if n_output_layers > 1:
             self.output_layers = [GatedResBlock11(hidden_dim, hidden_size=hidden_dim) for _ in range(n_output_layers-1)]
@@ -306,7 +321,7 @@ class PixelSnail(nn.Module):
         self.output_layers.append(ConvNorm2d11(hidden_dim, n_class))
         self.output_layers = nn.Sequential(*self.output_layers)
         
-    def forward(self, x):
+    def forward(self, x, img_cond=None, label_cond=None):
         x = (
             F.one_hot(x, self.n_class).permute(0, 3, 1, 2).float()
         )
@@ -315,7 +330,16 @@ class PixelSnail(nn.Module):
         
         out = x_down + x_downright
         
-        out = self.layers(out)
+        if img_cond is not None:
+            cond = self.cond_net(img_cond) #img
+            
+        if label_cond is not None:
+            label_cond = self.cond_embed(label_cond) #labele
+            label_cond = label_cond[..., None, None] #unsqueeze
+            cond = label_cond+cond if img_cond else label_cond #broadcast image
+        
+        for layer in self.layers:
+            out = layer(out, cond)
         
         out = self.output_layers(out)
         
