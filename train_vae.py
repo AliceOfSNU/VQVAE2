@@ -9,34 +9,49 @@ import wandb
 import numpy as np
 import os
 import argparse
+import json
 
 ## my source
 import vqvae
 from dataset import FFHQDataset, CatsDataset
 import utils
 
-USE_WANDB=False
+USE_WANDB=True
 BASE_DIR = "VQVAE"
-DATA_DIR = os.path.join(BASE_DIR, 'data/ffhq_images')
-MODEL_DIR = os.path.join(BASE_DIR, "model")
+FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data/ffhq_images')
+CATS_DATA_DIR = os.path.join(BASE_DIR, 'data/cat_faces/cats')
+MODEL_DIR = os.path.join(BASE_DIR, "model/single")
 
 config = {
-    "n_epochs" :5,
-    "lr" :1e-3,
+    "n_epochs" :50, #around 500 epochs with CosineAnnealing will do
+    "lr" :3e-4, #default 3e-4
     "hidden_dim": 128,
-    "embed_dim": 64,
-    "n_embed": 128,
+    "embed_dim": 64, #64 is fine
+    "n_embed": 256, #512 for paper
     "n_resblocks": 2,
     "seed": 12,
     "batch_size": 32,
-    "latent_loss_weight":0.2,
-    "run_id":"config",
+    "latent_loss_weight":0.25, #0.25 was default
+    "run_id":"VAE_single",
+    "note": "initial impl of single layer VAE on cats dataset",
     "model": "default"
 }
 
+run_id = config["run_id"]
+save_dir = os.path.join(MODEL_DIR, run_id)
+
+if USE_WANDB:
+    run = wandb.init(
+        name = config["run_id"], 
+        reinit = True, 
+        # run_id = ### Insert specific run id here if you want to resume a previous run
+        # resume = "must" ### You need this to resume previous runs, but comment out reinit = True when using this
+        project = "PixelCNN_VQVAE", 
+        config=config
+    )
 
 def train(model, train_loader, config):
-    # define loss
+    # posterior log likelihood log p(x|z)
     criterion = nn.MSELoss()
     latent_loss_weight = config["latent_loss_weight"]
     # define optimzier
@@ -45,13 +60,17 @@ def train(model, train_loader, config):
     batch_bar = tqdm(total=len(train_loader), dynamic_ncols=True, leave=False, position=0, desc='Train')
     
     n_epochs = config["n_epochs"]
+    best_loss = 1e6
     for epoch in range(n_epochs):
-        avg_loss = 0.0
+        avg_loss, avg_commitment_loss, avg_reconstr_loss = 0.0, 0.0, 0.0
         for i, img in enumerate(train_loader):
-            out, latent_loss = model(img.to(device))
+            img = img.to(device)
+            out, commitment_loss = model(img)
             reconstr_loss = criterion(out, img)
-            latent_loss = latent_loss.mean()
-            loss = reconstr_loss + latent_loss_weight * latent_loss
+            #commitment_loss = commitment_loss.mean()
+            # codebook loss is calculated inside quantizer.
+            # vae loss terms have two components:
+            loss = reconstr_loss + latent_loss_weight * commitment_loss
             
             optimizer.zero_grad()
             loss.backward()
@@ -59,9 +78,12 @@ def train(model, train_loader, config):
             
             # log
             avg_loss += loss.item()
+            avg_reconstr_loss += reconstr_loss.item()
+            avg_commitment_loss += commitment_loss.item()
             batch_bar.set_postfix(
-                loss="{:.04f}".format(loss / (i + 1)),
-                reconstr_loss="{:.04f}".format(reconstr_loss / (i + 1))
+                loss="{:.05f}".format(avg_loss / (i + 1)),
+                commitment_loss="{:.05f}".format(avg_commitment_loss / (i + 1)),
+                reconstr_loss="{:.05f}".format(avg_reconstr_loss / (i + 1))
                 #lr="{:.06f}".format(float(optimizer.param_groups[0]['lr'])
             )
             batch_bar.update()
@@ -71,12 +93,49 @@ def train(model, train_loader, config):
             torch.cuda.empty_cache()
         # train summary
         avg_loss /= len(train_loader)
-        
+        avg_commitment_loss /= len(train_loader)
+        avg_reconstr_loss /= len(train_loader)
         # log each epoch
         batch_bar.close()
-        print(f"epoch{epoch}/{n_epochs} loss:{avg_loss:.04f}")
+        print(f"epoch{epoch}/{n_epochs} loss:{avg_loss:.04f}\treconstruction_loss:{avg_reconstr_loss:.04f}\tcommitement_loss:{avg_commitment_loss:.04f}")
         
-
+        img = [train_loader.dataset[i].unsqueeze(0) for i in range(3)]
+        img = torch.cat(img, dim=0)
+        img = img.to(device)
+        out, commitment_loss = model(img)
+        reconstr = out.permute(0, 2, 3, 1).detach().cpu().numpy()
+        gt = img.permute(0, 2, 3, 1).detach().cpu().numpy()
+        
+        if USE_WANDB:
+            wandb.log({
+                'train_loss': avg_loss,
+                'train_commitment_loss': avg_commitment_loss,
+                'train_reconstr_loss': avg_reconstr_loss,
+                'reconstr_img': [wandb.Image(ex) for ex in reconstr],
+                'gt_img': [wandb.Image(ex) for ex in gt],
+            })
+        
+        # initialize save dirs
+        if epoch==0:
+            # saving and loading
+            os.makedirs(save_dir, exist_ok=True)
+            with open(os.path.join(save_dir, "config.json"), "w") as f:
+                json.dump(config, f, indent=2)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            print("best loss!")
+            utils.save_model(save_dir, "best", model, optimizer, stats_dict={
+                "train_loss": avg_loss,
+                "config": config
+            })
+        elif epoch > 0 and epoch % 20 == 0:
+            utils.save_model(save_dir, epoch, model, optimizer, stats_dict={
+                "train_loss": avg_loss,
+                "config": config
+            })
+            
+    if USE_WANDB:
+        run.finish() 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -84,7 +143,7 @@ if __name__ == "__main__":
     parser.add_argument('--single', help='run the smaller version', default=False, action='store_true')
     
     args = parser.parse_args()
-    if args["single"]:
+    if args.single:
         config["model"] = "single"
     else:
         config["model"] = "default"
@@ -104,7 +163,7 @@ if __name__ == "__main__":
 
     # model
     if config["model"] == "default":
-        train_data = FFHQDataset(data_dir=DATA_DIR)
+        train_data = FFHQDataset(data_dir=FFHQ_DATA_DIR)
         train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=1)
         model = vqvae.VQVAE(
             3,  #in channels
@@ -114,7 +173,7 @@ if __name__ == "__main__":
             config["n_resblocks"] #resblocks inside encoder/decoder
         )
     elif config["model"] == "single":
-        train_data = CatsDataset(data_dir=DATA_DIR)
+        train_data = CatsDataset(data_dir=CATS_DATA_DIR)
         train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=1)
         model = vqvae.SingleVQVAE(
             3,  #in channels

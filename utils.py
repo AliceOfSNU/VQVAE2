@@ -43,6 +43,6 @@ def save_model(save_path, epoch, model, optimizer, lr_scheduler=None, stats_dict
     if stats_dict:
         dict.update(stats_dict)
         
-    filename = "epoch{}.pth".format(epoch)
+    filename = "epoch_{}.pth".format(epoch)
     torch.save(dict, os.path.join(save_path, filename))
     

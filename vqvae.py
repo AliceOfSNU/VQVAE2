@@ -97,7 +97,12 @@ class QuantizedEmbedding(nn.Module):
         st = zq_onehot.float().transpose(0, 1) @ ze
         self.mt = gamma * self.mt + (1-gamma) * st
         
-        et = self.mt/self.Nt.unsqueeze(-1) #if self.Nt is zero?
+        # slight modification to counts adapted from 
+        # https://github.com/deepmind/sonnet
+        n = self.Nt.sum()
+        N = (self.Nt + eps) * n/(n + self.num_embeddings*eps)
+        
+        et = self.mt/N.unsqueeze(-1)#if self.Nt is zero?
         self.embedW.data.copy_(et)
         
     # x must be flattened in advance
@@ -129,7 +134,7 @@ class QuantizedEmbedding(nn.Module):
     def lookup(self, zq_idx):
         return F.embedding(zq_idx, self.embedW)
         
-        
+# VQVAE model class code was borrowed and modified from rosnality/vq-vae-2-pytorch
 class VQVAE(nn.Module):
     def __init__(self, in_channels, hidden_dim, embed_dim, n_embed, n_resblocks):
         super().__init__()
@@ -183,7 +188,8 @@ class VQVAE(nn.Module):
         upsampled = self.upsample(top_q)
         dec = self.bottom_decoder(torch.cat([upsampled, bottom_q], dim=1))
     
-    
+# a single-layer version of VQVAE.
+# much similar to the first version of VQVAE
 class SingleVQVAE(nn.Module):
     def __init__(self, in_channels, hidden_dim, embed_dim, n_embed, n_resblocks):
         super().__init__()
@@ -198,10 +204,10 @@ class SingleVQVAE(nn.Module):
         self.quantize = QuantizedEmbedding(n_embed, embed_dim)
         
         # up by 4
-        self.decoder = Decoder(embed_dim, in_channels, hidden_dim, n_resblocks=n_resblocks, upsample_ratio=2)
+        self.decoder = Decoder(embed_dim, in_channels, hidden_dim, n_resblocks=n_resblocks, upsample_ratio=4)
         
     def decode(self, q):
-        return self.bottom_decoder(q)
+        return self.decoder(q)
     
     def forward(self, x):
         encoded = self.encoder(x)
@@ -221,7 +227,7 @@ class SingleVQVAE(nn.Module):
     def encode(self, x):
         H, W = x.shape[-2:]
         x = x.flatten(-2).transpose(-1, -2)
-        quantized, sqdist, idxs = self.top_quantize(x)
+        quantized, sqdist, idxs = self.quantize(x)
         quantized = quantized.transpose(-1, -2).view(-1, self.embed_dim, H, W)
         idxs = idxs.view(-1, H, W)
         return quantized, sqdist, idxs
