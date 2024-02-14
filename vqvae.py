@@ -115,19 +115,25 @@ class QuantizedEmbedding(nn.Module):
         
     # x must be flattened in advance
     def forward(self, ze):
-        e = self.embedW.unsqueeze(0).expand(ze.shape[0], -1, -1)
-        dist = ze.unsqueeze(1) - e #broadcast
+        B = ze.shape[0]
+        ze_flat = ze.flatten(end_dim = -2)
+        
+        e = self.embedW.unsqueeze(0)
+        dist = ze_flat.unsqueeze(1) - e #broadcast
         dist = dist.pow(2).sum(dim=-1)
         
         # find closest vector for each x
         _, zq_idx = dist.min(dim=-1)
-        zq_onehot = F.one_hot(zq_idx, self.num_embeddings)
+        zq_onehot = F.one_hot(zq_idx, self.num_embeddings) #B, ze, V
         zq = self.lookup(zq_idx)
         
         # update
         if self.training:
-            self.update_weights(ze.detach(), zq_onehot, self.gamma, self.eps)
+            self.update_weights(ze_flat.detach(), zq_onehot, self.gamma, self.eps)
             
+        zq = zq.view(B, -1, *zq.shape[1:])
+        zq_idx = zq_idx.view(B, -1)
+        
         dist = (zq.detach() - ze).pow(2).mean() # the ||z_e(x)-sq[e]||^2 term
         zq = ze + (zq-ze).detach() # straight-through trick to pass gradient
         
@@ -139,6 +145,8 @@ class QuantizedEmbedding(nn.Module):
 class VQVAE(nn.Module):
     def __init__(self, in_channels, hidden_dim, embed_dim, n_embed, n_resblocks):
         super().__init__()
+        self.embed_dim = embed_dim
+        self.n_embed = n_embed
         # down by 4
         self.bottom_encoder = BottomEncoder(in_channels, hidden_dim, n_resblocks)
         # down by 2
@@ -165,7 +173,8 @@ class VQVAE(nn.Module):
         H, W = t_quantized.shape[-2:]
         t_quantized = t_quantized.flatten(-2).transpose(-1, -2)
         t_quantized, t_dists, t_idxs = self.top_quantize(t_quantized)
-        t_quantized = t_quantized.transpose(-1, -2).view(-1, -1, H, W)
+        t_quantized = t_quantized.transpose(-1, -2).view(-1, self.embed_dim, H, W)
+        t_idxs = t_idxs.view(-1, H, W)
         
         t_decoded = self.top_decoder(t_quantized)
         b_encoded = torch.cat([t_decoded, b_encoded], dim=1)
@@ -175,6 +184,7 @@ class VQVAE(nn.Module):
         b_quantized = b_quantized.flatten(-2).transpose(-1, -2)
         b_quantized, b_dists, b_idxs = self.bottom_quantize(b_quantized)
         b_quantized = b_quantized.transpose(-1, -2).view(-1, -1, H, W)
+        b_idxs = b_idxs.view(-1, H, W)
         
         dists = b_dists + t_dists
         b_decoded = self.decode(t_quantized, b_quantized)
