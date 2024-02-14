@@ -19,72 +19,59 @@ class ResBlock(nn.Module):
         out = out + x
         return self.activ(out)
     
-# 64x64 -> 32x32
-class TopEncoder(nn.Module):
-    def __init__(self, in_channels, hidden_dim, n_resblocks=2):
+class Encoder(nn.Module):
+    def __init__(self, in_channels, hidden_dim, n_resblocks=2, downsample_ratio=2):
         super().__init__()
-        blocks = [
-            nn.Conv2d(in_channels, hidden_dim//2, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim//2, hidden_dim, 3, padding=1),
-            nn.ReLU()
-        ]
+        if downsample_ratio == 2:
+            blocks = [
+                nn.Conv2d(in_channels, hidden_dim//2, 4, stride=2, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(hidden_dim//2, hidden_dim, 3, padding=1),
+                nn.ReLU()
+            ]
+        elif downsample_ratio == 4:
+            blocks = [
+                nn.Conv2d(in_channels, hidden_dim//2, 4, stride=2, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(hidden_dim//2, hidden_dim, 4, stride=2, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
+                nn.ReLU(inplace=True)
+            ]
+        else:
+            raise NotImplementedError("downsample ratio of 2 or 4 supported")
+                    
         blocks.extend([ResBlock(hidden_dim, hidden_dim//2) for n in range(n_resblocks)])
         self.blocks = nn.Sequential(*blocks)
     
     def forward(self, x):
         return self.blocks(x)
     
-# 256*256 -> 64x64 
-class BottomEncoder(nn.Module):
-    def __init__(self, in_channels, hidden_dim, n_resblocks=2):
-        super().__init__()
-        blocks = [
-            nn.Conv2d(in_channels, hidden_dim//2, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim//2, hidden_dim, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
-            nn.ReLU(inplace=True)
-        ]
-        blocks.extend([ResBlock(hidden_dim, hidden_dim//2) for n in range(n_resblocks)])
-        self.blocks = nn.Sequential(*blocks)
-    
-    def forward(self, x):
-        return self.blocks(x)
 
-# 32x32->64x64(unsample 2)
-class TopDecoder(nn.Module):
-    def __init__(self, in_channels, out_channels, hidden_dim, n_resblocks=2):
+class Decoder(nn.Module):
+    def __init__(self, in_channels, out_channels, hidden_dim, n_resblocks=2, upsample_ratio=2):
         super().__init__()
         blocks = [nn.Conv2d(in_channels, hidden_dim, 3, padding=1),
                   nn.ReLU(inplace=True)]
         blocks += [ResBlock(hidden_dim, hidden_dim//2) for n in range(n_resblocks)]
-        blocks.extend([
-            nn.ConvTranspose2d(hidden_dim, out_channels, 4, stride=2, padding=1)
-        ])
+        if upsample_ratio == 2:
+            blocks.extend([
+                nn.ConvTranspose2d(hidden_dim, out_channels, 4, stride=2, padding=1)
+            ])
+        elif upsample_ratio == 4:
+            blocks.extend([
+                nn.ConvTranspose2d(hidden_dim, hidden_dim//2, 4, stride=2, padding=1),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(hidden_dim//2, out_channels, 4, stride=2, padding=1),
+                nn.ReLU(inplace=True)
+            ])
+        else:
+            raise NotImplementedError("upsample ratio of 2 or 4 is supported")
         self.blocks = nn.Sequential(*blocks)
         
     def forward(self, x):
         return self.blocks(x)
 
-# 64x64->256x256(unsample 4)
-class BottomDecoder(nn.Module):
-    def __init__(self, in_channels, out_channels, hidden_dim, n_resblocks=2):
-        super().__init__()
-        blocks = [nn.Conv2d(in_channels, hidden_dim, 3, padding=1),
-                  nn.ReLU(inplace=True)]
-        blocks += [ResBlock(hidden_dim, hidden_dim//2) for n in range(n_resblocks)]
-        blocks.extend([
-            nn.ConvTranspose2d(hidden_dim, hidden_dim//2, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_dim//2, out_channels, 4, stride=2, padding=1),
-            nn.ReLU(inplace=True)
-        ])
-        self.blocks = nn.Sequential(*blocks)
-        
-    def forward(self, x):
-        return self.blocks(x)
              
 class QuantizedEmbedding(nn.Module):
     # much like nn.Embedding, but instead of training, use a custom update rule
@@ -142,20 +129,21 @@ class QuantizedEmbedding(nn.Module):
     def lookup(self, zq_idx):
         return F.embedding(zq_idx, self.embedW)
         
+        
 class VQVAE(nn.Module):
     def __init__(self, in_channels, hidden_dim, embed_dim, n_embed, n_resblocks):
         super().__init__()
         self.embed_dim = embed_dim
         self.n_embed = n_embed
         # down by 4
-        self.bottom_encoder = BottomEncoder(in_channels, hidden_dim, n_resblocks)
+        self.bottom_encoder = Encoder(in_channels, hidden_dim, n_resblocks, downsample_ratio=4)
         # down by 2
-        self.top_encoder = TopEncoder(hidden_dim, hidden_dim, n_resblocks)
+        self.top_encoder = Encoder(hidden_dim, hidden_dim, n_resblocks, downsample_ratio=2)
         self.top_quantize_conv = nn.Conv2d(hidden_dim, embed_dim, 1)
         self.top_quantize = QuantizedEmbedding(n_embed, embed_dim)
         
         # up by 2
-        self.top_decoder = TopDecoder(embed_dim, embed_dim, hidden_dim, n_resblocks=n_resblocks)
+        self.top_decoder = Decoder(embed_dim, embed_dim, hidden_dim, n_resblocks=n_resblocks, upsample_ratio=2)
         
         self.bottom_quantize_conv = nn.Conv2d(embed_dim + hidden_dim, embed_dim, 1)
         self.bottom_quantize = QuantizedEmbedding(n_embed, embed_dim)
@@ -163,7 +151,7 @@ class VQVAE(nn.Module):
         
         # up by 4 
         # this is also the final decoder
-        self.bottom_decoder = BottomDecoder(embed_dim+embed_dim, in_channels, hidden_dim, n_resblocks=n_resblocks)
+        self.bottom_decoder = Decoder(embed_dim+embed_dim, in_channels, hidden_dim, n_resblocks=n_resblocks, upsample_ratio=4)
         
     def forward(self, x):
         b_encoded = self.bottom_encoder(x)
@@ -186,9 +174,9 @@ class VQVAE(nn.Module):
         b_quantized = b_quantized.transpose(-1, -2).view(-1, -1, H, W)
         b_idxs = b_idxs.view(-1, H, W)
         
-        dists = b_dists + t_dists
+        latent_loss = b_dists + t_dists
         b_decoded = self.decode(t_quantized, b_quantized)
-        return b_decoded, dists
+        return b_decoded, latent_loss
         
     
     def decode(self, top_q, bottom_q):
@@ -196,3 +184,44 @@ class VQVAE(nn.Module):
         dec = self.bottom_decoder(torch.cat([upsampled, bottom_q], dim=1))
     
     
+class SingleVQVAE(nn.Module):
+    def __init__(self, in_channels, hidden_dim, embed_dim, n_embed, n_resblocks):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_embed = n_embed
+        
+        # down by 4
+        self.encoder = Encoder(in_channels, hidden_dim, n_resblocks, downsample_ratio=4)
+        
+        # quantize
+        self.quantize_conv = nn.Conv2d(hidden_dim, embed_dim, 1)
+        self.quantize = QuantizedEmbedding(n_embed, embed_dim)
+        
+        # up by 4
+        self.decoder = Decoder(embed_dim, in_channels, hidden_dim, n_resblocks=n_resblocks, upsample_ratio=2)
+        
+    def decode(self, q):
+        return self.bottom_decoder(q)
+    
+    def forward(self, x):
+        encoded = self.encoder(x)
+        
+        quantized = self.quantize_conv(encoded)
+        quantized, sqdist, quantized_idxs = self.encode(quantized)
+        
+        decoded = self.decode(quantized)
+        
+        return decoded, sqdist
+    
+    # performs encoding action exclusively
+    # returns
+    #   quantized: embed_dim vector for each pixel
+    #   sqdist: single value tensor for the commitment loss
+    #   idxs: LongTensor for indexing into the codebook
+    def encode(self, x):
+        H, W = x.shape[-2:]
+        x = x.flatten(-2).transpose(-1, -2)
+        quantized, sqdist, idxs = self.top_quantize(x)
+        quantized = quantized.transpose(-1, -2).view(-1, self.embed_dim, H, W)
+        idxs = idxs.view(-1, H, W)
+        return quantized, sqdist, idxs

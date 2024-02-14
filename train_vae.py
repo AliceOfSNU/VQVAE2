@@ -8,10 +8,11 @@ from tqdm import tqdm
 import wandb
 import numpy as np
 import os
+import argparse
 
 ## my source
 import vqvae
-from dataset import FFHQDataset
+from dataset import FFHQDataset, CatsDataset
 import utils
 
 USE_WANDB=False
@@ -28,35 +29,11 @@ config = {
     "n_resblocks": 2,
     "seed": 12,
     "batch_size": 32,
-    "latent_loss_weight":0.2
+    "latent_loss_weight":0.2,
+    "run_id":"config",
+    "model": "default"
 }
-np.random.seed(config["seed"])
-torch.manual_seed(config["seed"])
 
-torch.cuda.empty_cache()
-gc.collect()
-
-# Dataset
-transform = transforms.Compose(
-    [
-        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-    ]
-)
-train_data = FFHQDataset(data_dir=DATA_DIR)
-train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=1)
-
-# model
-model = vqvae.VQVAE(
-    3,  #in channels
-    config["hidden_dim"], #hidden dim
-    config["embed_dim"], #embed dim
-    config["n_embed"], #vocab size(dictionary embedding n)
-    config["n_resblocks"] #resblocks inside encoder/decoder
-)
-
-device = torch.device("cuda")
-model = model.to(device)
-print("training on device: ", device)
 
 def train(model, train_loader, config):
     # define loss
@@ -88,7 +65,10 @@ def train(model, train_loader, config):
                 #lr="{:.06f}".format(float(optimizer.param_groups[0]['lr'])
             )
             batch_bar.update()
-        
+            
+            # cleanup
+            del img, out
+            torch.cuda.empty_cache()
         # train summary
         avg_loss /= len(train_loader)
         
@@ -96,4 +76,56 @@ def train(model, train_loader, config):
         batch_bar.close()
         print(f"epoch{epoch}/{n_epochs} loss:{avg_loss:.04f}")
         
-train(model, train_loader, config)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n_gpu", type=int, default=1)
+    parser.add_argument('--single', help='run the smaller version', default=False, action='store_true')
+    
+    args = parser.parse_args()
+    if args["single"]:
+        config["model"] = "single"
+    else:
+        config["model"] = "default"
+        
+    np.random.seed(config["seed"])
+    torch.manual_seed(config["seed"])
+
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    # Dataset
+    transform = transforms.Compose(
+        [
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+        ]
+    )
+
+    # model
+    if config["model"] == "default":
+        train_data = FFHQDataset(data_dir=DATA_DIR)
+        train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=1)
+        model = vqvae.VQVAE(
+            3,  #in channels
+            config["hidden_dim"], #hidden dim
+            config["embed_dim"], #embed dim
+            config["n_embed"], #vocab size(dictionary embedding n)
+            config["n_resblocks"] #resblocks inside encoder/decoder
+        )
+    elif config["model"] == "single":
+        train_data = CatsDataset(data_dir=DATA_DIR)
+        train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=1)
+        model = vqvae.SingleVQVAE(
+            3,  #in channels
+            config["hidden_dim"], #hidden dim
+            config["embed_dim"], #embed dim
+            config["n_embed"], #vocab size(dictionary embedding n)
+            config["n_resblocks"] #resblocks inside encoder/decoder
+        )
+
+    device = torch.device("cuda")
+    model = model.to(device)
+    print("training on device: ", device)
+    train(model, train_loader, config)
+    
