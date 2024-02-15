@@ -210,10 +210,7 @@ class SingleVQVAE(nn.Module):
         return self.decoder(q)
     
     def forward(self, x):
-        encoded = self.encoder(x)
-        
-        quantized = self.quantize_conv(encoded)
-        quantized, sqdist, quantized_idxs = self.encode(quantized)
+        quantized, sqdist, quantized_idxs = self.encode(x)
         
         decoded = self.decode(quantized)
         
@@ -225,9 +222,18 @@ class SingleVQVAE(nn.Module):
     #   sqdist: single value tensor for the commitment loss
     #   idxs: LongTensor for indexing into the codebook
     def encode(self, x):
+        x = self.encoder(x)
+        x = self.quantize_conv(x)
         H, W = x.shape[-2:]
         x = x.flatten(-2).transpose(-1, -2)
         quantized, sqdist, idxs = self.quantize(x)
         quantized = quantized.transpose(-1, -2).view(-1, self.embed_dim, H, W)
         idxs = idxs.view(-1, H, W)
         return quantized, sqdist, idxs
+    
+    def generate(self, code):
+        with torch.inference_mode():
+            code = self.quantize.lookup(code)
+            decoded = self.decode(code.permute(0, 3, 1, 2))#channel first
+        return torch.clamp(decoded, 0.0, 1.0)
+    

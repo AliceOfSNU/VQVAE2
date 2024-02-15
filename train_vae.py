@@ -23,7 +23,7 @@ CATS_DATA_DIR = os.path.join(BASE_DIR, 'data/cat_faces/cats')
 MODEL_DIR = os.path.join(BASE_DIR, "model/single")
 
 config = {
-    "n_epochs" :50, #around 500 epochs with CosineAnnealing will do
+    "n_epochs" :20, #around 500 epochs with CosineAnnealing will do
     "lr" :3e-4, #default 3e-4
     "hidden_dim": 128,
     "embed_dim": 64, #64 is fine
@@ -32,8 +32,8 @@ config = {
     "seed": 12,
     "batch_size": 32,
     "latent_loss_weight":0.25, #0.25 was default
-    "run_id":"VAE_single",
-    "note": "initial impl of single layer VAE on cats dataset",
+    "run_id":"VAE_single_residual_full",
+    "note": "no bottleneck in residual layers",
     "model": "default"
 }
 
@@ -57,12 +57,13 @@ def train(model, train_loader, config):
     # define optimzier
     optimizer = optimizer = optim.Adam(model.parameters(), lr=config["lr"])
     # define scheduler
-    batch_bar = tqdm(total=len(train_loader), dynamic_ncols=True, leave=False, position=0, desc='Train')
     
     n_epochs = config["n_epochs"]
     best_loss = 1e6
     for epoch in range(n_epochs):
         avg_loss, avg_commitment_loss, avg_reconstr_loss = 0.0, 0.0, 0.0
+        batch_bar = tqdm(total=len(train_loader), dynamic_ncols=True, leave=False, position=0, desc='Train')
+        
         for i, img in enumerate(train_loader):
             img = img.to(device)
             out, commitment_loss = model(img)
@@ -103,7 +104,7 @@ def train(model, train_loader, config):
         img = torch.cat(img, dim=0)
         img = img.to(device)
         out, commitment_loss = model(img)
-        reconstr = out.permute(0, 2, 3, 1).detach().cpu().numpy()
+        reconstr = np.clip(out.permute(0, 2, 3, 1).detach().cpu().numpy(), 0.0, 1.0)
         gt = img.permute(0, 2, 3, 1).detach().cpu().numpy()
         
         if USE_WANDB:
@@ -128,7 +129,7 @@ def train(model, train_loader, config):
                 "train_loss": avg_loss,
                 "config": config
             })
-        elif epoch > 0 and epoch % 20 == 0:
+        elif epoch > 0 and epoch % 5== 0:
             utils.save_model(save_dir, epoch, model, optimizer, stats_dict={
                 "train_loss": avg_loss,
                 "config": config

@@ -224,7 +224,7 @@ class JoinBlock(nn.Module):
         x1 = self.conv_in1(self.activ(x1))
         x2 = self.conv_in2(self.activ(x2))
         out = x1+x2
-        out = self.activ(self.conv_out(self.activ(out)))
+        out = self.conv_out(self.activ(out))
         return out
     
 # block
@@ -330,6 +330,7 @@ class PixelSnail(nn.Module):
         
         out = x_down + x_downright
         
+        cond = None
         if img_cond is not None:
             cond = self.cond_net(img_cond) #img
             

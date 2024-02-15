@@ -1,6 +1,8 @@
 import torch
 import matplotlib.pyplot as plt
 import os
+from PIL import Image
+import numpy as np
 
 def plot_tensor(t:torch.Tensor):
     fig, ax = plt.subplots(1, 1)
@@ -8,9 +10,20 @@ def plot_tensor(t:torch.Tensor):
     elif len(t.shape) == 2: t.unsqueeze(0)
     ax.imshow(t.detach().permute(1, 2, 0).cpu().numpy())
     
+def save_numpy_images(t, save_path):
+    if len(t.shape) > 3:
+        datas = [ex for ex in t]
+    else:
+        datas = [t]
+        
+    for idx, data in enumerate(datas):
+        im = Image.fromarray(np.uint8(data*255))
+        path = os.path.join(save_path, f"img{idx}")
+        im.save(path, "jpeg")
+        
+    
 def plot_tensor_grid(t:torch.Tensor, grid:tuple[int, int], 
                      save_to=None, title=None, xlabel=None, ylabel=None):
-    assert(t.shape[0] == grid[0]*grid[1], "grid size must match the number of elements in the first(batch) dimension")
     t = t.detach().permute(0, 2, 3, 1).cpu().numpy()
     fig, ax = plt.subplots(*grid)
     for i in range(grid[0]):

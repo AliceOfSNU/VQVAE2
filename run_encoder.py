@@ -17,8 +17,9 @@ from dataset import FFHQDataset, CatsDataset
 import utils
 
 BASE_DIR = "VQVAE"
-DATA_DIR = os.path.join(BASE_DIR, 'data/ffhq_images')
-MODEL_DIR = os.path.join(BASE_DIR, "model/single")
+FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data/ffhq_images')
+CATS_DATA_DIR = os.path.join(BASE_DIR, 'data/cat_faces/cats')
+MODEL_DIR = os.path.join(BASE_DIR, "model")
 
 # example config to show its contents
 config = {
@@ -37,32 +38,35 @@ config = {
 ## contains code from rosnality/vq-vae-2-pytorch
 
 def extract(lmdb_env, loader, model, device, config):
-    if config["model"] == "default":
-        CodeRow = namedtuple('CodeRow', ['top', 'bottom', 'filename'])
-    elif config["model"] == "single":
-        CodeRow = namedtuple('CodeRow', ['code', 'filename'])
+    #if config["model"] == "default":
+    #    CodeRow = namedtuple('CodeRow', ['top', 'bottom', 'filename'])
+    #elif config["model"] == "single":
+    #    CodeRow = namedtuple('CodeRow', ['code', 'filename'])
 
     index = 0
     with lmdb_env.begin(write=True) as txn:
         pbar = tqdm(loader)
 
-        for img, _, filename in pbar:
-            img = img.to(device)
+        for data in pbar:
             # run model encode and write result for each image
             if config["model"] == "default":
+                img = data[0].to(device)
+                filename = data[2]
                 _, _, _, id_t, id_b = model.encode(img)
                 id_t = id_t.detach().cpu().numpy()
                 id_b = id_b.detach().cpu().numpy()
                 for file, top, bottom in zip(filename, id_t, id_b):
-                    row = CodeRow(top=top, bottom=bottom, filename=file)
+                    row = {"top": top, "bottom": bottom, "filename": file}
                     txn.put(str(index).encode('utf-8'), pickle.dumps(row))
                     index += 1
                     pbar.set_description(f'inserted: {index}')
             elif config["model"] == "single":
+                img = data[0].to(device)
+                filename = data[1]
                 _, _, idxs = model.encode(img)
-                idxs = idx.detach().cpu().numpy()
+                idxs = idxs.detach().cpu().numpy()
                 for file, idx in zip(filename, idxs):
-                    row = CodeRow(idx=idx, filename=file)
+                    row = {"code":idx, "filename":file}
                     txn.put(str(index).encode('utf-8'), pickle.dumps(row))
                     index += 1
                     pbar.set_description(f'inserted: {index}')
@@ -77,7 +81,8 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     # loads json config
-    with open(args["ckpt"], "r") as f:
+    load_path = os.path.join(MODEL_DIR, args.ckpt)
+    with open(os.path.join(load_path, "config.json"), "r") as f:
         config = json.load(f)
     run_id = config["run_id"]
     np.random.seed(config["seed"])
@@ -88,7 +93,7 @@ if __name__ == '__main__':
 
     # create model
     if config["model"] == "default":
-        train_data = FFHQDataset(data_dir=DATA_DIR)
+        train_data = FFHQDataset(data_dir=FFHQ_DATA_DIR)
         train_loader = DataLoader(train_data, batch_size=64, num_workers=1)
         model = VQVAE(
             3,  #in channels
@@ -98,7 +103,7 @@ if __name__ == '__main__':
             config["n_resblocks"] #resblocks inside encoder/decoder
         )
     elif config["model"] == "single":
-        train_data = CatsDataset(data_dir=DATA_DIR)
+        train_data = CatsDataset(data_dir=CATS_DATA_DIR)
         train_loader = DataLoader(train_data, batch_size=64, num_workers=1)
         model = SingleVQVAE(
             3,  #in channels
@@ -109,7 +114,7 @@ if __name__ == '__main__':
         )
 
     # load weights
-    model, _, specs = utils.load_model(args["ckpt"], model)
+    model, _, specs = utils.load_model(os.path.join(load_path, "epoch_best.pth"), model)
     
     # device
     device = torch.device("cuda")
@@ -118,8 +123,9 @@ if __name__ == '__main__':
     model.eval()
 
     # code from rosanality/vq-vae-2-pytorch
-    map_size = 100 * 1024 * 1024 * 1024
-    env = lmdb.open(args.name, map_size=map_size)
+    map_size = 100 << 20
+    save_path = os.path.join(load_path, "code.lmdb")
+    env = lmdb.open(save_path, map_size=map_size)
     extract(env, train_loader, model, device, config)
     
     
