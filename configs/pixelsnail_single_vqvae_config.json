@@ -1,0 +1,18 @@
+{
+  "n_epochs" :50,
+  "lr" :1e-3,
+  "hidden_dim": 128,
+  "n_layers": 2,
+  "n_resblocks": 4,
+  "n_output_layers":2,
+  "batch_size": 32,
+  "attn_embed_dim":128,
+  "attn_n_heads":4,
+  "down_kernel": [2, 5],
+  "downright_kernel":[2, 3],
+  "hidden_kernel":[3, 5],
+  "run_id": "single/PRIOR_single",
+  "vae_id": "single/VAE_single",
+  "seed": 12,
+  "note": "prior for default SingleVAE"
+}

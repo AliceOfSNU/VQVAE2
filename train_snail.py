@@ -152,10 +152,12 @@ if __name__ == "__main__":
     
     # pixelsnail for mnist digits = (28, 28), 256 channels for each pixel
     Snailmodel = PixelSnail(256, hidden_dim=config["hidden_dim"], target_size=(16, 16),
-                    n_layers = config["n_layers"], n_resblocks=config["n_resblocks"], n_output_layers=config["n_output_layers"], 
+                    n_layers = config["n_layers"], 
+                    n_resblocks = config["n_resblocks"], 
+                    n_output_layers = config["n_output_layers"], 
                     down_kernel = config["down_kernel"], 
-                    downright_kernel=config["downright_kernel"], 
-                    hidden_kernel=config["hidden_kernel"])
+                    downright_kernel = config["downright_kernel"], 
+                    hidden_kernel = config["hidden_kernel"])
     Snailmodel = Snailmodel.to(device)
 
     # VAEmodel

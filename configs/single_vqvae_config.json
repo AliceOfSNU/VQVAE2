@@ -1,0 +1,14 @@
+{
+  "n_epochs": 50,
+  "lr": 0.0003,
+  "hidden_dim": 128,
+  "embed_dim": 64,
+  "n_embed": 256,
+  "n_resblocks": 2,
+  "seed": 12,
+  "batch_size": 32,
+  "latent_loss_weight": 0.25,
+  "run_id": "VAE_single",
+  "note": "initial impl of single layer VAE on cats dataset",
+  "model": "single"
+}
