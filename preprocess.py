@@ -5,7 +5,7 @@ from torchvision import transforms
 import os
 
 DATA_DIR = 'VQVAE/data/ffhq_images/images_original'
-SAVE_DIR = 'VQVAE/data/ffhq_images/images_resized_10000'
+SAVE_DIR = 'VQVAE/data/ffhq_images/images_resized_20000'
 def crop_images():
     for path_dir in os.listdir(DATA_DIR):
         if not os.path.isdir(os.path.join(DATA_DIR, path_dir)):continue

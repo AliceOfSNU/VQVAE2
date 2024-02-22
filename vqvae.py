@@ -9,6 +9,8 @@ class ResBlock(nn.Module):
         # resblock has bottleneck channels
         self.conv = nn.Sequential(
             nn.Conv2d(in_channel, channel, 3, padding=1),
+            nn.BatchNorm2d(channel),
+            nn.Dropout(0.1),
             nn.ReLU(inplace=True),
             nn.Conv2d(channel, in_channel, 1),
         )
@@ -32,8 +34,12 @@ class Encoder(nn.Module):
         elif downsample_ratio == 4:
             blocks = [
                 nn.Conv2d(in_channels, hidden_dim//2, 4, stride=2, padding=1),
+                nn.BatchNorm2d(hidden_dim//2),
+                nn.Dropout(0.1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(hidden_dim//2, hidden_dim, 4, stride=2, padding=1),
+                nn.BatchNorm2d(hidden_dim),
+                nn.Dropout(0.1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
                 nn.ReLU(inplace=True)
@@ -174,9 +180,9 @@ class VQVAE(nn.Module):
         
         b_quantized = self.bottom_quantize_conv(b_encoded)
         H, W = b_quantized.shape[-2:]
-        b_quantized = b_quantized.flatten(-2).transpose(-1, -2)
+        b_quantized = b_quantized.flatten(-2).transpose(-1, -2) #(B, H*W, C)
         b_quantized, b_dists, b_idxs = self.bottom_quantize(b_quantized)
-        b_quantized = b_quantized.transpose(-1, -2).view(-1, -1, H, W)
+        b_quantized = b_quantized.transpose(-1, -2).view(-1, -1, H, W) #(B, C, H, W)
         b_idxs = b_idxs.view(-1, H, W)
         
         latent_loss = b_dists + t_dists

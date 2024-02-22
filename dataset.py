@@ -6,20 +6,39 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 import os
 import lmdb
+import json
+
 FFHQ_DATA_DIR = 'VQVAE/data/ffhq_images'
+FFHQ_LABELS_DIR = 'VQVAE/data/ffhq-features-dataset-master'
 CAT_DATA_DIR = 'VQVAE/data/cat_faces/cats'
 
 class FFHQDataset(Dataset):
-    def __init__(self, data_dir = FFHQ_DATA_DIR):
+    def __init__(self, data_dir = FFHQ_DATA_DIR, labels_dir = FFHQ_LABELS_DIR):
+        # helper function
+        def flatten_dict(dic, pfx=""):
+            add_dict = {}
+            for k, v in dic.items():
+                if isinstance(v, dict):
+                    add_dict.update(flatten_dict(v, k))
+                else:
+                    k = k if pfx == "" else pfx+"_"+k
+                    add_dict[k] = v
+            return add_dict
         self.img_files = []
         print("create memory efficient dataset from data ", data_dir)
+        self.labels = np.load(f'{labels_dir}/all_labels.npy',allow_pickle=True).item()
+        print("all labels loaded.. ")
+        all_cnt = 0
         for path_dir in os.listdir(data_dir):
             if not os.path.isdir(os.path.join(data_dir, path_dir)):continue
             if "resized" not in path_dir: continue
             path_dir = os.path.join(data_dir, path_dir)
             print("processing ", path_dir)
             for file in os.listdir(path_dir):
+                if file.split('.')[0] not in self.labels: continue #check label exists
+                if all_cnt >= 100: break
                 self.img_files.append(os.path.join(path_dir, file))
+                all_cnt += 1
         
         print("\ttotal image cnt: ", len(self.img_files))
 
@@ -29,7 +48,8 @@ class FFHQDataset(Dataset):
     def __getitem__(self, ind):
         data = Image.open(self.img_files[ind])
         data = transforms.ToTensor()(data)
-        return data
+        file_id = self.img_files[ind].split('/')[-1].split('.')[0]
+        return data, self.labels[file_id]
 
 
 class CatsDataset(Dataset):
