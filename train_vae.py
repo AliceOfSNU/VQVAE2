@@ -16,23 +16,23 @@ import vqvae
 from dataset import FFHQDataset, CatsDataset
 import utils
 
-USE_WANDB=True
+USE_WANDB=False
 BASE_DIR = "VQVAE"
 FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data/ffhq_images')
 CATS_DATA_DIR = os.path.join(BASE_DIR, 'data/cat_faces/cats')
 MODEL_DIR = os.path.join(BASE_DIR, "model/single")
 
 config = {
-    "n_epochs" :20, #around 500 epochs with CosineAnnealing will do
+    "n_epochs" :200, #around 500 epochs with CosineAnnealing will do
     "lr" :3e-4, #default 3e-4
     "hidden_dim": 128,
     "embed_dim": 64, #64 is fine
-    "n_embed": 256, #512 for paper
+    "n_embed": 512, #512 for paper
     "n_resblocks": 2,
     "seed": 12,
     "batch_size": 32,
     "latent_loss_weight":0.25, #0.25 was default
-    "run_id":"VAE_single_residual_full",
+    "run_id":"VQVAE2",
     "note": "no bottleneck in residual layers",
     "model": "default"
 }
@@ -64,8 +64,8 @@ def train(model, train_loader, config):
         avg_loss, avg_commitment_loss, avg_reconstr_loss = 0.0, 0.0, 0.0
         batch_bar = tqdm(total=len(train_loader), dynamic_ncols=True, leave=False, position=0, desc='Train')
         
-        for i, img in enumerate(train_loader):
-            img = img.to(device)
+        for i, (img, label) in enumerate(train_loader):
+            img = img.to(device) #C, H, W
             out, commitment_loss = model(img)
             reconstr_loss = criterion(out, img)
             #commitment_loss = commitment_loss.mean()
@@ -155,17 +155,11 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     gc.collect()
 
-    # Dataset
-    transform = transforms.Compose(
-        [
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-        ]
-    )
 
     # model
     if config["model"] == "default":
         train_data = FFHQDataset(data_dir=FFHQ_DATA_DIR)
-        train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=1)
+        train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=0)
         model = vqvae.VQVAE(
             3,  #in channels
             config["hidden_dim"], #hidden dim
@@ -175,7 +169,7 @@ if __name__ == "__main__":
         )
     elif config["model"] == "single":
         train_data = CatsDataset(data_dir=CATS_DATA_DIR)
-        train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=1)
+        train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=0)
         model = vqvae.SingleVQVAE(
             3,  #in channels
             config["hidden_dim"], #hidden dim

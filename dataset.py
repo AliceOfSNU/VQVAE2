@@ -36,18 +36,22 @@ class FFHQDataset(Dataset):
             print("processing ", path_dir)
             for file in os.listdir(path_dir):
                 if file.split('.')[0] not in self.labels: continue #check label exists
-                if all_cnt >= 100: break
+                if all_cnt >= 1000: break
                 self.img_files.append(os.path.join(path_dir, file))
                 all_cnt += 1
         
         print("\ttotal image cnt: ", len(self.img_files))
-
+        self.transforms = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+        ])
+        
     def __len__(self):
         return len(self.img_files)
 
     def __getitem__(self, ind):
         data = Image.open(self.img_files[ind])
-        data = transforms.ToTensor()(data)
+        data = self.transforms(data) #is it best to apply transform here?
         file_id = self.img_files[ind].split('/')[-1].split('.')[0]
         return data, self.labels[file_id]
 

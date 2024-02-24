@@ -90,13 +90,15 @@ class QuantizedEmbedding(nn.Module):
         W = torch.randn(num_embeddings, embed_dim)
         
         self.register_buffer("embedW", W)
-        self.register_buffer("mt", W.clone())
+        #self.register_buffer("mt", W.clone()) #should be zeros_like(W) or (1-gamma)*W
+        self.register_buffer("mt", torch.zeros_like(W)) #should be zeros_like(W) or (1-gamma)*W
         self.register_buffer("Nt", torch.zeros(num_embeddings))
         
     # when using inplace operations(_) do not reassign.
     def update_weights(self, ze, zq_onehot, gamma, eps):
         # appendix A.1. from "Neural Discrete Representation Learning" 
         # https://arxiv.org/pdf/1711.00937.pdf
+        # exponential moving average is same as sonnet.
         nt = zq_onehot.sum(dim = 0) #vector of length num_embeddings
         self.Nt = gamma * self.Nt + (1-gamma) * nt
         
@@ -106,6 +108,7 @@ class QuantizedEmbedding(nn.Module):
         # slight modification to counts adapted from 
         # https://github.com/deepmind/sonnet
         n = self.Nt.sum()
+        # maybe suffices to write self.Nr + eps?
         N = (self.Nt + eps) * n/(n + self.num_embeddings*eps)
         
         et = self.mt/N.unsqueeze(-1)#if self.Nt is zero?
