@@ -16,23 +16,25 @@ from vqvae import VQVAE, SingleVQVAE
 from dataset import FFHQDataset, CatsDataset
 import utils
 
-BASE_DIR = "VQVAE"
-FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data/ffhq_images')
+BASE_DIR = "VQVAE2"
+FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data')
 CATS_DATA_DIR = os.path.join(BASE_DIR, 'data/cat_faces/cats')
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 
 # example config to show its contents
 config = {
-    "n_epochs" :5,
-    "lr" :1e-3,
-    "hidden_dim": 128,
-    "embed_dim": 64,
-    "n_embed": 128,
-    "n_resblocks": 2,
-    "seed": 12,
-    "batch_size": 32,
-    "latent_loss_weight":0.2,
-    "model": "default"
+  "n_epochs": 200,
+  "lr": 0.0003,
+  "hidden_dim": 128,
+  "embed_dim": 64,
+  "n_embed": 512,
+  "n_resblocks": 2,
+  "seed": 12,
+  "batch_size": 32,
+  "latent_loss_weight": 0.25,
+  "run_id": "VAE2_base",
+  "note": "batchnorms every two layers",
+  "model": "default"
 }
 
 ## contains code from rosnality/vq-vae-2-pytorch
@@ -50,8 +52,9 @@ def extract(lmdb_env, loader, model, device, config):
         for data in pbar:
             # run model encode and write result for each image
             if config["model"] == "default":
-                img = data[0].to(device)
-                filename = data[2]
+                img, labels= data
+                img = img.to(device)
+                filename = labels["file_id"]
                 _, _, _, id_t, id_b = model.encode(img)
                 id_t = id_t.detach().cpu().numpy()
                 id_b = id_b.detach().cpu().numpy()
@@ -123,7 +126,7 @@ if __name__ == '__main__':
     model.eval()
 
     # code from rosanality/vq-vae-2-pytorch
-    map_size = 100 << 20
+    map_size = 100 << 24
     save_path = os.path.join(load_path, "code.lmdb")
     env = lmdb.open(save_path, map_size=map_size)
     extract(env, train_loader, model, device, config)

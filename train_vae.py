@@ -16,11 +16,12 @@ import vqvae
 from dataset import FFHQDataset, CatsDataset
 import utils
 
-USE_WANDB=False
-BASE_DIR = "VQVAE"
-FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data/ffhq_images')
+USE_WANDB=True
+BASE_DIR = "VQVAE2"
+FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data')
+FFHQ_LABELS_DIR = os.path.join(BASE_DIR, 'data/ffhq-features-dataset-master')
 CATS_DATA_DIR = os.path.join(BASE_DIR, 'data/cat_faces/cats')
-MODEL_DIR = os.path.join(BASE_DIR, "model/single")
+MODEL_DIR = os.path.join(BASE_DIR, "model/default")
 
 config = {
     "n_epochs" :200, #around 500 epochs with CosineAnnealing will do
@@ -32,8 +33,8 @@ config = {
     "seed": 12,
     "batch_size": 32,
     "latent_loss_weight":0.25, #0.25 was default
-    "run_id":"VQVAE2",
-    "note": "no bottleneck in residual layers",
+    "run_id":"VAE2_base",
+    "note": "batchnorms every two layers",
     "model": "default"
 }
 
@@ -92,6 +93,9 @@ def train(model, train_loader, config):
             # cleanup
             del img, out
             torch.cuda.empty_cache()
+            
+            #debugonly
+            #if i == 10: break
         # train summary
         avg_loss /= len(train_loader)
         avg_commitment_loss /= len(train_loader)
@@ -100,12 +104,12 @@ def train(model, train_loader, config):
         batch_bar.close()
         print(f"epoch{epoch}/{n_epochs} loss:{avg_loss:.04f}\treconstruction_loss:{avg_reconstr_loss:.04f}\tcommitement_loss:{avg_commitment_loss:.04f}")
         
-        img = [train_loader.dataset[i].unsqueeze(0) for i in range(3)]
-        img = torch.cat(img, dim=0)
-        img = img.to(device)
-        out, commitment_loss = model(img)
-        reconstr = np.clip(out.permute(0, 2, 3, 1).detach().cpu().numpy(), 0.0, 1.0)
-        gt = img.permute(0, 2, 3, 1).detach().cpu().numpy()
+        for i, (img, label) in enumerate(train_loader):
+            img = img.to(device)
+            out, commitment_loss = model(img)
+            break
+        reconstr = np.clip(out[:10].permute(0, 2, 3, 1).detach().cpu().numpy(), 0.0, 1.0)
+        gt = img[:10].permute(0, 2, 3, 1).detach().cpu().numpy()
         
         if USE_WANDB:
             wandb.log({
@@ -158,7 +162,7 @@ if __name__ == "__main__":
 
     # model
     if config["model"] == "default":
-        train_data = FFHQDataset(data_dir=FFHQ_DATA_DIR)
+        train_data = FFHQDataset(data_dir=FFHQ_DATA_DIR, labels_dir=FFHQ_LABELS_DIR)
         train_loader = DataLoader(train_data, batch_size=config["batch_size"], num_workers=0)
         model = vqvae.VQVAE(
             3,  #in channels

@@ -67,9 +67,9 @@ class Decoder(nn.Module):
         elif upsample_ratio == 4:
             blocks.extend([
                 nn.ConvTranspose2d(hidden_dim, hidden_dim//2, 4, stride=2, padding=1),
+                nn.BatchNorm2d(hidden_dim//2),
                 nn.ReLU(inplace=True),
                 nn.ConvTranspose2d(hidden_dim//2, out_channels, 4, stride=2, padding=1),
-                nn.ReLU(inplace=True)
             ])
         else:
             raise NotImplementedError("upsample ratio of 2 or 4 is supported")
@@ -119,12 +119,21 @@ class QuantizedEmbedding(nn.Module):
         B = ze.shape[0]
         ze_flat = ze.flatten(end_dim = -2)
         
-        e = self.embedW.unsqueeze(0)
-        dist = ze_flat.unsqueeze(1) - e #broadcast
-        dist = dist.pow(2).sum(dim=-1)
+        # this code will run out of gpu
+        #e = self.embedW.unsqueeze(0)
+        #dist = ze_flat.unsqueeze(1) - e #broadcast
+        #dist = dist.pow(2).sum(dim=-1)
         
+        # this code works.. ???
+        dist = (
+            ze_flat.pow(2).sum(1, keepdim=True)
+            - 2 * ze_flat @ self.embedW.T
+            + self.embedW.T.pow(2).sum(0, keepdim=True)
+        )
         # find closest vector for each x
         _, zq_idx = dist.min(dim=-1)
+        del dist
+        
         zq_onehot = F.one_hot(zq_idx, self.num_embeddings) #B, ze, V
         zq = self.lookup(zq_idx)
         
@@ -158,7 +167,6 @@ class VQVAE(nn.Module):
         
         # up by 2
         self.top_decoder = Decoder(embed_dim, embed_dim, hidden_dim, n_resblocks=n_resblocks, upsample_ratio=2)
-        
         self.bottom_quantize_conv = nn.Conv2d(embed_dim + hidden_dim, embed_dim, 1)
         self.bottom_quantize = QuantizedEmbedding(n_embed, embed_dim)
         self.upsample = nn.ConvTranspose2d(embed_dim, embed_dim, 4, stride=2, padding=1)
@@ -168,6 +176,11 @@ class VQVAE(nn.Module):
         self.bottom_decoder = Decoder(embed_dim+embed_dim, in_channels, hidden_dim, n_resblocks=n_resblocks, upsample_ratio=4)
         
     def forward(self, x):
+        t_quantized, b_quantized, latent_loss, _, _ = self.encode(x)
+        b_decoded = self.decode(t_quantized, b_quantized)
+        return b_decoded, latent_loss
+        
+    def encode(self, x):
         b_encoded = self.bottom_encoder(x)
         t_encoded = self.top_encoder(b_encoded)
         
@@ -185,17 +198,14 @@ class VQVAE(nn.Module):
         H, W = b_quantized.shape[-2:]
         b_quantized = b_quantized.flatten(-2).transpose(-1, -2) #(B, H*W, C)
         b_quantized, b_dists, b_idxs = self.bottom_quantize(b_quantized)
-        b_quantized = b_quantized.transpose(-1, -2).view(-1, -1, H, W) #(B, C, H, W)
+        b_quantized = b_quantized.transpose(-1, -2).view(-1, self.embed_dim, H, W) #(B, C, H, W)
         b_idxs = b_idxs.view(-1, H, W)
         
-        latent_loss = b_dists + t_dists
-        b_decoded = self.decode(t_quantized, b_quantized)
-        return b_decoded, latent_loss
-        
+        return t_quantized, b_quantized, b_dists + t_dists, t_idxs, b_idxs
     
     def decode(self, top_q, bottom_q):
         upsampled = self.upsample(top_q)
-        dec = self.bottom_decoder(torch.cat([upsampled, bottom_q], dim=1))
+        return self.bottom_decoder(torch.cat([upsampled, bottom_q], dim=1))
     
 # a single-layer version of VQVAE.
 # much similar to the first version of VQVAE
