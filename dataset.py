@@ -8,9 +8,9 @@ import os
 import lmdb
 import json
 
-FFHQ_DATA_DIR = 'VQVAE2/data'
-FFHQ_LABELS_DIR = 'VQVAE2/data/ffhq-features-dataset-master'
-CAT_DATA_DIR = 'VQVAE2/data/cat_faces/cats'
+FFHQ_DATA_DIR = 'VQVAE/data/ffhq_images'
+FFHQ_LABELS_DIR = 'VQVAE/data/ffhq-features-dataset-master'
+CAT_DATA_DIR = 'VQVAE/data/cat_faces/cats'
 
 class FFHQDataset(Dataset):
     def __init__(self, data_dir = FFHQ_DATA_DIR, labels_dir = FFHQ_LABELS_DIR):
@@ -46,7 +46,7 @@ class FFHQDataset(Dataset):
                 all_cnt += 1
         
         print("\ttotal image cnt: ", len(self.img_files))
-        print(f"{len(invalid_files)} invalid files out of {processed}: {invalid_files[0]}, {invalid_files[1]}, ...")
+        print(f"{len(invalid_files)} invalid files out of {processed}...")
         self.transforms = transforms.Compose([
             transforms.ToTensor(), #DO NOT NORMALIZE DATA
         ])
@@ -82,7 +82,7 @@ class CatsDataset(Dataset):
         return data, self.img_files[ind]
 
 class LmdbDataset(Dataset):
-    def __init__(self, data_dir, keys =["code"]):
+    def __init__(self, data_dir, labels_dir=None, keys =["code"]):
         self.data_dir = data_dir
         print("create lmdb dataset from data ", data_dir)
         self.db = lmdb.open(
@@ -94,9 +94,16 @@ class LmdbDataset(Dataset):
             meminit=False
         )
         self.keys = keys
+        # get labels
+        if labels_dir is not None:
+            self.labels = np.load(f'{labels_dir}/all_labels.npy',allow_pickle=True).item()
+        else: self.labels = None
+        print("all labels loaded.. label count:", len(self.labels))
+        # get length
         with self.db.begin(write=False) as txn:
             self.length = int(txn.get("length".encode('utf-8')).decode('utf-8'))
         print(f"\t contains {self.length}rows.")
+        
     def __len__(self):
         return self.length
 
@@ -104,4 +111,6 @@ class LmdbDataset(Dataset):
         with self.db.begin(write=False) as txn:
             data = pickle.loads(txn.get(str(ind).encode('utf-8')))
             ret = [torch.from_numpy(data[k]) for k in self.keys]
-        return ret, data["filename"]
+            file_id = data["filename"]
+            label = self.labels[file_id] if self.labels else None
+        return ret, label, file_id

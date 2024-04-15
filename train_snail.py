@@ -17,33 +17,42 @@ import utils
 
 
 USE_WANDB=True
+## Generating samples while training will take up more memory
+## especially because this instantiates the encoder model as well
+## run eval on trained model, instead
 GENERATE_SAMPLES=False
 
 config = {
-    "n_epochs" :50,
-    "lr" :3e-4, #default mode
+    "n_epochs" :15,
+    "lr" :2e-4, #default mode
     "hidden_dim":256,
     "n_layers": 3,
-    "n_resblocks": 4,
+    "n_resblocks": 3,
     "n_output_layers":2,
+    "n_cond_embed": 0,
+    "n_cond_img": 256,
     "batch_size": 16,
     "attn_embed_dim":256,
     "attn_n_heads":8,
-    "input_size": (32, 32), #16*16 for single, 32*32 for base
+    "n_embed": 256,
+    "input_size": (64, 64), #input image size
     "down_kernel": (2, 5),
     "downright_kernel":(2, 3),
     "hidden_kernel":(3, 5),
-    "run_id": "default/prior_4layers",
-    "vae_id": "default/VAE2_base",
+    "run_id": "default/VAE2_256x16_bottom_2",
+    "vae_id": "default/VAE2_256x16",
     "seed": 12,
-    "note": "unconditioned prior(top) for default VAE2"
+    "note": "prior(bottom) for VAE2 with smaller codebook",
+    "top_n_bottom": True,
+    "conditions":[]
 }
 
 
-BASE_DIR = "VQVAE2"
-SNAIL_MODEL_DIR = os.path.join(BASE_DIR, "model/snail_prior")
+BASE_DIR = "VQVAE"
+SNAIL_MODEL_DIR = os.path.join(BASE_DIR, "model/snail_prior", config["run_id"])
 VAE_MODEL_DIR = os.path.join(BASE_DIR, "model", config["vae_id"])
 DATA_DIR = os.path.join(VAE_MODEL_DIR, "code.lmdb")
+LABELS_DIR = os.path.join(BASE_DIR,"data/ffhq-features-dataset-master")
 run_id = config["run_id"]
 save_dir = os.path.join(SNAIL_MODEL_DIR, run_id)
 
@@ -58,17 +67,19 @@ if USE_WANDB:
     )
         
 # generates priors with pixelsnail
-def generate_samples(model, N, size, device, cond = None):
+def generate_samples(model, N, size, device, img_cond = None, label_cond = None):
     # return 1, H, W generated samples from model.
-    model.eval()
-    result = torch.zeros(N, *size, dtype=torch.int64).to(device)
-    for i in range(size[0]):
-        for j in range(size[1]):
-            out = model(result, label_cond=cond)
-            prob = out[:, :, i, j].softmax(dim = 1)
-            result[:, i, j] = torch.multinomial(prob, 1).squeeze(-1)
-            
-    model.train()
+    batch_bar = tqdm(total=size[0]*size[1], dynamic_ncols=True, leave=False, position=0, desc='Generate z')
+    with torch.inference_mode():
+        result = torch.zeros(N, *size, dtype=torch.int64).to(device)
+        for i in range(size[0]):
+            for j in range(size[1]):
+                out = model(result, img_cond=img_cond, label_cond=label_cond)
+                prob = out[:, :, i, j].softmax(dim = 1)
+                result[:, i, j] = torch.multinomial(prob, 1).squeeze(-1)           
+                batch_bar.set_postfix({ "pixels": i*size[1]+j})
+                batch_bar.update()
+    batch_bar.close()
     return result
 
 def train(model, VAE_model, train_loader, config):
@@ -86,9 +97,13 @@ def train(model, VAE_model, train_loader, config):
         accuracy, train_loss = 0.0, 0.0
         batch_bar = tqdm(total=len(train_loader), dynamic_ncols=True, leave=False, position=0, desc='Train')
         # train top
-        for i, (img, fileid) in enumerate(train_loader):
-            img = img[0].to(device)
-            out = model(img, img_cond=None, label_cond=None)
+        for i, (data, label, fileid) in enumerate(train_loader):
+            img = data[0].to(device)
+            if config["top_n_bottom"]: cond = data[1].to(device)
+            else: cond=None
+            if len(config["conditions"])>0: label_cond = label
+            else: label_cond = None
+            out = model(img, img_cond=cond, label_cond=label_cond)
             
             loss = criterion(out, img)
             train_loss += loss.item()
@@ -112,7 +127,7 @@ def train(model, VAE_model, train_loader, config):
             del img
             torch.cuda.empty_cache()
             # debug only
-            #if i == 10: break
+            #if i == 5: break
         
         train_loss /= len(train_loader)
         accuracy /= len(train_loader)
@@ -124,11 +139,18 @@ def train(model, VAE_model, train_loader, config):
             'accuracy': accuracy
         }
         if GENERATE_SAMPLES:
-            samples = generate_samples(model, 10, config["input_size"], device) #LongTensor
-            samples = VAE_model.generate(samples.detach())
-            samples = samples.cpu().numpy()
-            samples = np.transpose(samples, (0, 2, 3, 1)) #channel last
-            info['samples':]=[wandb.Image(sample) for sample in samples]
+            for i, (data, label, fileid) in enumerate(train_loader):
+                if config["top_n_bottom"]: img_cond= data[1].to(device)
+                else: img_cond=None
+                samples = generate_samples(model, 16, config["input_size"], device, img_cond=img_cond, label_cond=label) #LongTensor
+                samples = VAE_model.generate(img_cond, samples.detach(), labels=label)
+                samples = samples.cpu().numpy()
+                samples = np.transpose(samples, (0, 2, 3, 1)) #channel last
+                break # run only one generation
+            info['samples']=[wandb.Image(
+                sample,
+                caption=f"gender={label['gender'][i]}, age={label['age'][i].item()}"
+            ) for i, sample in enumerate(samples)]
         if USE_WANDB: wandb.log(info)
         
         # checkpointing
@@ -145,51 +167,108 @@ def train(model, VAE_model, train_loader, config):
             })
     if USE_WANDB:
         run.finish()
-        
-if __name__ == "__main__":
-    np.random.seed(config["seed"])
-    torch.manual_seed(config["seed"])
-
-    torch.cuda.empty_cache()
-    gc.collect()
-
-    dataset = LmdbDataset(DATA_DIR, keys=["top"])
-    train_loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0)
-
-    device = torch.device("cuda")
-    print("training on device: ", device)
     
-    # pixelsnail for mnist digits = (28, 28), 256 channels for each pixel
-    Snailmodel = PixelSnail(512, hidden_dim=config["hidden_dim"], target_size=config["input_size"],
-                    n_layers = config["n_layers"], 
-                    n_resblocks = config["n_resblocks"], 
-                    n_output_layers = config["n_output_layers"], 
-                    down_kernel = config["down_kernel"], 
-                    downright_kernel = config["downright_kernel"], 
-                    hidden_kernel = config["hidden_kernel"])
-    Snailmodel = nn.DataParallel(Snailmodel)
-    Snailmodel = Snailmodel.to(device)
-
-    # VAEmodel
-    VAE_model = None
+    
+def evaluate(model, val_loader, config):
+    model.eval()
+    info = {}
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    info['top'], info['labels'], info['bottom']= [], [], []
+    info['samples']=[]
+    for i, (data, label, fileid) in enumerate(val_loader):
+        if config["top_n_bottom"]: t_idxs= data[1].to(device)
+        else: t_idxs=None
+        b_idxs = generate_samples(model, 8, config["input_size"], device, img_cond=t_idxs, label_cond=label) #LongTensor
+        info["labels"], info['top'], info['bottom']= label, t_idxs.detach().clone(), b_idxs.detach().clone()
+        break # run only one generation
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     if GENERATE_SAMPLES:
         with open(os.path.join(VAE_MODEL_DIR, "config.json"), "r") as f:
             VAE_config = json.load(f)
         
         if VAE_config["model"] == "single":
-            mode_cls = SingleVQVAE
-        elif  VAE_config["model"] == "default":
-            model_cls = VQVAE
-        VAE_model = model_cls(
+            VAE_model = SingleVQVAE(
                 3,  #in channels
                 VAE_config["hidden_dim"], #hidden dim
                 VAE_config["embed_dim"], #embed dim
                 VAE_config["n_embed"], #vocab size(dictionary embedding n)
-                VAE_config["n_resblocks"] #resblocks inside encoder/decoder
-        )
-        VAE_model = VAE_model.to(device)
+                VAE_config["n_resblocks"], #resblocks inside encoder/decoder,
+                conditioned=False
+            )
+        elif  VAE_config["model"] == "default":
+            VAE_model = VQVAE(
+                3,  #in channels
+                VAE_config["hidden_dim"], #hidden dim
+                VAE_config["embed_dim"], #embed dim
+                VAE_config["n_embed"], #vocab size(dictionary embedding n)
+                VAE_config["n_resblocks"], #resblocks inside encoder/decoder,
+                conditioned=len(VAE_config["conditions"])>0
+            )
 
-        # load weights
-        model, _, specs = utils.load_model(os.path.join(VAE_MODEL_DIR, "epoch_best.pth"), VAE_model)
+        VAE_model = VAE_model.to(device)
+        _, _, specs = utils.load_model(os.path.join(VAE_MODEL_DIR, "epoch_best.pth"), VAE_model)
+        VAE_model.eval()
+        
+        samples = VAE_model.generate(info['top'], info["bottom"], labels=label)
+        samples = samples.cpu().numpy()
+        samples = np.transpose(samples, (0, 2, 3, 1)) #channel last
+        info['samples'] = samples
+        
+        if USE_WANDB:
+            images=[wandb.Image(
+                sample,
+                caption=f"gender={label['gender'][i]}, age={label['age'][i].item()}"
+            ) for i, sample in enumerate(samples)]
+            wandb.log({'samples': images})
+        else:
+            utils.save_numpy_images(samples, SNAIL_MODEL_DIR)
+    return info
     
-    train(Snailmodel, VAE_model, train_loader, config)
+    
+if __name__ == "__main__":
+    np.random.seed(config["seed"])
+    torch.manual_seed(config["seed"])
+
+    if config["top_n_bottom"]:
+        dataset = LmdbDataset(DATA_DIR, labels_dir=LABELS_DIR, keys=["bottom", "top"])
+    else:
+        dataset = LmdbDataset(DATA_DIR, labels_dir=LABELS_DIR, keys=["top"])
+    train_loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0)
+
+    device = torch.device("cuda")
+    print("training on device: ", device)
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    # pixelsnail for mnist digits = (28, 28), 256 channels for each pixel
+    if config["top_n_bottom"]:
+        Snailmodel = PixelSnail(config["n_embed"], hidden_dim=config["hidden_dim"], target_size=config["input_size"],
+            n_layers = config["n_layers"], 
+            n_resblocks = config["n_resblocks"], 
+            n_output_layers = config["n_output_layers"], 
+            n_cond_img=config["n_cond_img"],
+            n_cond_embed=config["n_cond_embed"],
+            n_cond_resblocks=3,
+            attention=False,
+            down_kernel = config["down_kernel"], 
+            downright_kernel = config["downright_kernel"], 
+            hidden_kernel = config["hidden_kernel"])
+    else:
+        Snailmodel = PixelSnail(config["n_embed"], hidden_dim=config["hidden_dim"], target_size=config["input_size"],
+            n_layers = config["n_layers"], 
+            n_resblocks = config["n_resblocks"], 
+            n_output_layers = config["n_output_layers"], 
+            attention=True,
+            down_kernel = config["down_kernel"], 
+            downright_kernel = config["downright_kernel"], 
+            hidden_kernel = config["hidden_kernel"])
+    Snailmodel = nn.DataParallel(Snailmodel)
+    #_, _, specs = utils.load_model(os.path.join(SNAIL_MODEL_DIR, "epoch_18.pth"), Snailmodel)
+    Snailmodel = Snailmodel.to(device)
+    train(Snailmodel, None, train_loader, config)
+    #evaluate(Snailmodel, train_loader, config)

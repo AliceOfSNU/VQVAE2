@@ -1,4 +1,6 @@
 import torch
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
 from PIL import Image
@@ -18,10 +20,27 @@ def save_numpy_images(t, save_path):
         
     for idx, data in enumerate(datas):
         im = Image.fromarray(np.uint8(data*255))
-        path = os.path.join(save_path, f"img{idx}")
+        path = os.path.join(save_path, f"img{idx}.jpeg")
         im.save(path, "jpeg")
         
-    
+def plt_to_numpy(t, plotter):
+    # given a numpy array, plot with plt and return the plots as numpy
+    datas = [ex for ex in t]
+    ret = []
+    for img in datas:
+        fig, ax = plt.subplots(1, 1)
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_xticks([]); ax.set_yticks([])
+        plotter(ax, img)
+        plt.tight_layout()
+        fig.canvas.draw()
+        data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        ret.append(data)
+        plt.close(fig)
+    return ret
+
+
 def plot_tensor_grid(t:torch.Tensor, grid:tuple[int, int], 
                      save_to=None, title=None, xlabel=None, ylabel=None):
     t = t.detach().permute(0, 2, 3, 1).cpu().numpy()

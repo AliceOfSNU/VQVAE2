@@ -16,27 +16,29 @@ from vqvae import VQVAE, SingleVQVAE
 from dataset import FFHQDataset, CatsDataset
 import utils
 
-BASE_DIR = "VQVAE2"
-FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data')
+BASE_DIR = "VQVAE"
+FFHQ_DATA_DIR = os.path.join(BASE_DIR, 'data/ffhq_images')
 CATS_DATA_DIR = os.path.join(BASE_DIR, 'data/cat_faces/cats')
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 
 # example config to show its contents
-config = {
-  "n_epochs": 200,
-  "lr": 0.0003,
-  "hidden_dim": 128,
-  "embed_dim": 64,
-  "n_embed": 512,
-  "n_resblocks": 2,
-  "seed": 12,
-  "batch_size": 32,
-  "latent_loss_weight": 0.25,
-  "run_id": "VAE2_base",
-  "note": "batchnorms every two layers",
-  "model": "default"
+config={
+    "n_epochs": 20,
+    "lr": 0.0003,
+    "hidden_dim": 128,
+    "embed_dim": 16,
+    "n_embed": 256,
+    "n_resblocks": 2,
+    "seed": 12,
+    "batch_size": 32,
+    "latent_loss_weight": 0.25,
+    "run_id": "VAE2_256x16",
+    "note": "codebook size 128 of 16 dims",
+    "model": "default",
+    "conditions": [],
+    "aux_tasks":[],
+    "aux_loss_weights":{}
 }
-
 ## contains code from rosnality/vq-vae-2-pytorch
 
 def extract(lmdb_env, loader, model, device, config):
@@ -44,7 +46,7 @@ def extract(lmdb_env, loader, model, device, config):
     #    CodeRow = namedtuple('CodeRow', ['top', 'bottom', 'filename'])
     #elif config["model"] == "single":
     #    CodeRow = namedtuple('CodeRow', ['code', 'filename'])
-
+    criterion = nn.MSELoss()
     index = 0
     with lmdb_env.begin(write=True) as txn:
         pbar = tqdm(loader)
@@ -55,7 +57,12 @@ def extract(lmdb_env, loader, model, device, config):
                 img, labels= data
                 img = img.to(device)
                 filename = labels["file_id"]
-                _, _, _, id_t, id_b = model.encode(img)
+                # deal with conditions
+                if len(config["conditions"])>0: cond = model.embed_conditions(labels)
+                else: cond = None
+                t_quantized, b_quantized, _, id_t, id_b = model.encode(img, cond)
+                b_decoded = model.decode(t_quantized, b_quantized, cond)
+                reconstr_loss = criterion(b_decoded, img)
                 id_t = id_t.detach().cpu().numpy()
                 id_b = id_b.detach().cpu().numpy()
                 for file, top, bottom in zip(filename, id_t, id_b):
@@ -97,13 +104,14 @@ if __name__ == '__main__':
     # create model
     if config["model"] == "default":
         train_data = FFHQDataset(data_dir=FFHQ_DATA_DIR)
-        train_loader = DataLoader(train_data, batch_size=64, num_workers=1)
+        train_loader = DataLoader(train_data, batch_size=32, num_workers=1)
         model = VQVAE(
             3,  #in channels
             config["hidden_dim"], #hidden dim
             config["embed_dim"], #embed dim
             config["n_embed"], #vocab size(dictionary embedding n)
-            config["n_resblocks"] #resblocks inside encoder/decoder
+            config["n_resblocks"], #resblocks inside encoder/decoder,
+            conditioned=len(config["conditions"])>0
         )
     elif config["model"] == "single":
         train_data = CatsDataset(data_dir=CATS_DATA_DIR)
@@ -113,7 +121,8 @@ if __name__ == '__main__':
             config["hidden_dim"], #hidden dim
             config["embed_dim"], #embed dim
             config["n_embed"], #vocab size(dictionary embedding n)
-            config["n_resblocks"] #resblocks inside encoder/decoder
+            config["n_resblocks"], #resblocks inside encoder/decoder,
+            conditioned=False
         )
 
     # load weights

@@ -2,6 +2,8 @@
 /__pycache__
 /data
 notebook.ipynb
+rosanlity_snail.py
+train_snail2.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
